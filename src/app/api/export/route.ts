@@ -34,7 +34,6 @@ type MatrixResult = {
 function toMarkdown(result: MatrixResult) {
   const s = result.summary;
 
-  // Evidence map: CB-xx -> req IDs
   const evidenceMap = new Map<string, Set<string>>();
   for (const r of result.requirements) {
     for (const ev of r.evidenceIds ?? []) {
@@ -103,9 +102,7 @@ export async function POST(req: Request) {
 
     if (format === "json") {
       return NextResponse.json(result, {
-        headers: {
-          "Content-Disposition": `attachment; filename="matrixmint-proofpack.json"`,
-        },
+        headers: { "Content-Disposition": `attachment; filename="matrixmint-proofpack.json"` },
       });
     }
 

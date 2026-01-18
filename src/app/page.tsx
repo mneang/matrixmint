@@ -60,7 +60,7 @@ function badgeStyle(status: CoverageStatus): React.CSSProperties {
   return { ...base, background: "rgba(239,68,68,0.16)" };
 }
 
-function smallPill(label: string): React.CSSProperties {
+function smallPill(_label: string): React.CSSProperties {
   return {
     display: "inline-flex",
     alignItems: "center",
@@ -76,6 +76,27 @@ function smallPill(label: string): React.CSSProperties {
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+async function downloadFromExport(format: "md" | "json", result: MatrixResult) {
+  const res = await fetch(`/api/export?format=${format}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ result }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Export failed (${res.status}). ${text ? text.slice(0, 200) : ""}`.trim());
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = format === "md" ? "matrixmint-proofpack.md" : "matrixmint-proofpack.json";
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function Home() {
@@ -127,6 +148,7 @@ export default function Home() {
     const rows = result?.requirements ?? [];
     return rows.filter((r) => {
       const q = query.trim().toLowerCase();
+
       const matchesQuery =
         !q ||
         r.id.toLowerCase().includes(q) ||
@@ -178,11 +200,17 @@ export default function Home() {
       setResult(json.data as MatrixResult);
     } catch (e: any) {
       const msg = String(e?.message ?? "Analyze failed");
-if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.includes("UNAVAILABLE")) {
-  setError("Gemini is temporarily overloaded (503). MatrixMint will retry automatically—please click Run Analysis again in a few seconds.");
-} else {
-  setError(msg);
-}
+      if (
+        msg.toLowerCase().includes("overloaded") ||
+        msg.includes("503") ||
+        msg.includes("UNAVAILABLE")
+      ) {
+        setError(
+          "Gemini is temporarily overloaded (503). MatrixMint retries automatically—click Run Analysis again in a few seconds."
+        );
+      } else {
+        setError(msg);
+      }
     } finally {
       setAnalyzing(false);
     }
@@ -194,6 +222,16 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
     setCapabilityText(selectedSample.capabilityText);
     setResult(null);
     setError("");
+  }
+
+  async function exportProofPack(format: "md" | "json") {
+    if (!result) return;
+    setError("");
+    try {
+      await downloadFromExport(format, result);
+    } catch (e: any) {
+      setError(e?.message ?? "Export failed");
+    }
   }
 
   const headerStyle: React.CSSProperties = {
@@ -228,7 +266,12 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
     gap: 16,
   };
 
-  const label: React.CSSProperties = { fontSize: 12, fontWeight: 700, opacity: 0.8, marginBottom: 6 };
+  const label: React.CSSProperties = {
+    fontSize: 12,
+    fontWeight: 700,
+    opacity: 0.8,
+    marginBottom: 6,
+  };
 
   const textarea: React.CSSProperties = {
     width: "100%",
@@ -264,11 +307,26 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
   };
 
   return (
-    <div style={{ background: "linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.00))", minHeight: "100vh" }}>
+    <div
+      style={{
+        background: "linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.00))",
+        minHeight: "100vh",
+      }}
+    >
       <header style={headerStyle}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
+        >
           <div>
-            <h1 style={{ fontSize: 34, fontWeight: 900, letterSpacing: -0.5, margin: 0 }}>MatrixMint</h1>
+            <h1 style={{ fontSize: 34, fontWeight: 900, letterSpacing: -0.5, margin: 0 }}>
+              MatrixMint
+            </h1>
             <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.85 }}>
               Evidence-locked RFP compliance matrix + proposal outline.{" "}
               <span style={{ fontWeight: 800 }}>No hallucinations.</span> きっと勝つ。
@@ -279,73 +337,64 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
             <select
               value={model}
               onChange={(e) => setModel(e.target.value as any)}
-              style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(0,0,0,0.14)", fontWeight: 800 }}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(0,0,0,0.14)",
+                fontWeight: 800,
+              }}
               title="Model"
             >
               <option value="gemini-3-flash-preview">Gemini 3 Flash (fast)</option>
               <option value="gemini-3-pro-preview">Gemini 3 Pro (best)</option>
             </select>
 
-            <button style={buttonSecondary} onClick={loadSampleToEditors} disabled={loadingSamples || !selectedSample}>
+            <button
+              style={buttonSecondary}
+              onClick={loadSampleToEditors}
+              disabled={loadingSamples || !selectedSample || analyzing}
+            >
               Load Sample
             </button>
 
             <button style={button} onClick={runAnalysis} disabled={analyzing}>
               {analyzing ? "Analyzing..." : "Run Analysis"}
             </button>
+
+            {result ? (
+              <>
+                <button
+                  style={buttonSecondary}
+                  onClick={() => exportProofPack("md")}
+                  disabled={analyzing}
+                  title="Download a judge-ready proof pack in Markdown"
+                >
+                  Download Proof Pack (MD)
+                </button>
+                <button
+                  style={buttonSecondary}
+                  onClick={() => exportProofPack("json")}
+                  disabled={analyzing}
+                  title="Download the raw structured output as JSON"
+                >
+                  Download JSON
+                </button>
+              </>
+            ) : null}
           </div>
         </div>
-
-        {result ? (
-  <>
-    <button
-      style={buttonSecondary}
-      onClick={async () => {
-        const res = await fetch("/api/export?format=md", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ result }),
-        });
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "matrixmint-proofpack.md";
-        a.click();
-        URL.revokeObjectURL(url);
-      }}
-    >
-      Download Proof Pack (MD)
-    </button>
-
-    <button
-      style={buttonSecondary}
-      onClick={async () => {
-        const res = await fetch("/api/export?format=json", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ result }),
-        });
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "matrixmint-proofpack.json";
-        a.click();
-        URL.revokeObjectURL(url);
-      }}
-    >
-      Download JSON
-    </button>
-  </>
-) : null}
 
         <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ ...label, marginBottom: 0 }}>Sample:</span>
           <select
             value={selectedSampleId}
             onChange={(e) => setSelectedSampleId(e.target.value)}
-            style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(0,0,0,0.14)", minWidth: 320 }}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(0,0,0,0.14)",
+              minWidth: 320,
+            }}
           >
             {samples.map((s) => (
               <option key={s.id} value={s.id}>
@@ -354,15 +403,27 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
             ))}
           </select>
 
-          <span style={{ fontSize: 12, opacity: 0.75 }}>
-            Tip: Flash for iteration, Pro for final demo.
-          </span>
+          <span style={{ fontSize: 12, opacity: 0.75 }}>Tip: Flash for iteration, Pro for final demo.</span>
         </div>
 
         {error ? (
-          <div style={{ marginTop: 14, padding: 12, borderRadius: 12, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)" }}>
+          <div
+            style={{
+              marginTop: 14,
+              padding: 12,
+              borderRadius: 12,
+              border: "1px solid rgba(239,68,68,0.3)",
+              background: "rgba(239,68,68,0.08)",
+            }}
+          >
             <div style={{ fontWeight: 900 }}>Error</div>
-            <div style={{ marginTop: 6, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
+            <div
+              style={{
+                marginTop: 6,
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                fontSize: 12,
+              }}
+            >
               {error}
             </div>
           </div>
@@ -387,14 +448,24 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
             <section style={{ marginTop: 16, ...grid3 }}>
               <div style={card}>
                 <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.8 }}>Coverage</div>
-                <div style={{ marginTop: 6, fontSize: 34, fontWeight: 900 }}>{coverage.pct.toFixed(0)}%</div>
+                <div style={{ marginTop: 6, fontSize: 34, fontWeight: 900 }}>
+                  {coverage.pct.toFixed(0)}%
+                </div>
                 <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <span style={smallPill(`Covered: ${coverage.covered}`)}>Covered: {coverage.covered}</span>
                   <span style={smallPill(`Partial: ${coverage.partial}`)}>Partial: {coverage.partial}</span>
                   <span style={smallPill(`Missing: ${coverage.missing}`)}>Missing: {coverage.missing}</span>
                   <span style={smallPill(`Total: ${coverage.total}`)}>Total: {coverage.total}</span>
                 </div>
-                <div style={{ marginTop: 10, height: 10, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
+                <div
+                  style={{
+                    marginTop: 10,
+                    height: 10,
+                    borderRadius: 999,
+                    background: "rgba(0,0,0,0.08)",
+                    overflow: "hidden",
+                  }}
+                >
                   <div style={{ width: `${coverage.pct}%`, height: "100%", background: "black" }} />
                 </div>
                 <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
@@ -426,7 +497,15 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
             </section>
 
             <section style={{ marginTop: 16, ...card }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                }}
+              >
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 900 }}>Compliance Matrix</div>
                   <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
@@ -495,7 +574,15 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
                   <tbody>
                     {filteredRequirements.map((r) => (
                       <tr key={r.id}>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontWeight: 900, fontSize: 12, whiteSpace: "nowrap" }}>
+                        <td
+                          style={{
+                            padding: 10,
+                            borderBottom: "1px solid rgba(0,0,0,0.10)",
+                            fontWeight: 900,
+                            fontSize: 12,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
                           {r.id}
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontSize: 12, whiteSpace: "nowrap" }}>
@@ -583,8 +670,12 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
           <section style={{ marginTop: 16, ...card }}>
             <div style={{ fontSize: 16, fontWeight: 900 }}>How to use</div>
             <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.7 }}>
-              <li>Click <b>Load Sample</b> (or paste your own RFP + Capability Brief).</li>
-              <li>Click <b>Run Analysis</b> to generate a compliance matrix with evidence.</li>
+              <li>
+                Click <b>Load Sample</b> (or paste your own RFP + Capability Brief).
+              </li>
+              <li>
+                Click <b>Run Analysis</b> to generate a compliance matrix with evidence.
+              </li>
               <li>Filter by status, search CB-IDs, and copy the proposal outline for submission drafts.</li>
             </ol>
             <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
