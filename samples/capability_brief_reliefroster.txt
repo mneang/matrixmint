@@ -1,0 +1,19 @@
+CAPABILITY BRIEF
+Product: ReliefRoster
+Vendor: MatrixMint Solutions (Sample)
+
+CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation.
+CB-02 Coordinators can create events and define shifts with capacity limits; volunteers can self-signup for available shifts.
+CB-03 Automated email confirmations and reminders are supported with configurable schedules (e.g., 24h, 2h).
+CB-04 Attendance tracking is supported for each shift, including notes and no-show marking.
+CB-05 Volunteer profiles support skills, language preference, certifications, and availability notes.
+CB-06 Role-based access is supported with Admin, Coordinator, and Volunteer roles.
+CB-07 Messaging templates can be authored in English and Spanish; coordinators can choose the template language per send.
+CB-08 Dashboards include volunteer counts, fill rates, attendance rate, and volunteer hours by event.
+CB-09 CSV export is supported for rosters, schedules, and attendance logs.
+CB-10 Coordinators can broadcast announcements to volunteer segments (by skill and language preference).
+CB-11 Coordinator actions are recorded in an audit log (event creation/editing and message sends).
+CB-12 Data retention rules can be configured for inactive volunteers (organization chooses retention period).
+CB-13 UI supports mobile browsers and includes keyboard navigation for key workflows.
+CB-14 SMS reminders are not included by default; integration is possible via a third-party SMS provider if the organization supplies an account.
+CB-15 ReliefRoster is designed for organizations up to ~5,000 volunteers on standard deployment.
