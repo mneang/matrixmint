@@ -1,0 +1,59 @@
+REQUEST FOR PROPOSAL (RFP)
+Disaster Relief Volunteer Coordination Platform
+RFP ID: DRVC-2026-01
+Issuing Organization: RapidRelief Network (Nonprofit)
+Submission Due Date: (Sample) March 15, 2026
+
+1. Background
+RapidRelief Network coordinates volunteers and supplies during local disasters (fires, floods, heat emergencies). We need a platform to coordinate volunteer intake, scheduling, communications, and reporting.
+
+2. Project Goals
+- Reduce volunteer onboarding time from days to hours
+- Improve attendance reliability and shift coverage
+- Provide clear reporting for donors and local partners
+- Support bilingual communications (English/Spanish)
+
+3. Scope of Work
+The vendor shall provide a web-based platform that supports volunteer registration, shift scheduling, communications, and reporting. The solution shall include administrative tools for coordinators and basic access for volunteers.
+
+4. Functional Requirements (Must/Shall)
+FR-01 The system shall support volunteer registration with configurable form fields.
+FR-02 The system shall allow coordinators to create events and define shifts with capacity limits.
+FR-03 The system shall allow volunteers to sign up for shifts and receive confirmations.
+FR-04 The system shall send automated reminders 24 hours and 2 hours before a shift via email.
+FR-05 The system shall support optional SMS reminders (if enabled by the organization).
+FR-06 The system shall allow coordinators to mark attendance and record no-shows.
+FR-07 The system shall maintain a volunteer profile including languages, skills, certifications, and availability.
+FR-08 The system shall support role-based access (Admin, Coordinator, Volunteer).
+FR-09 The system shall provide a bilingual messaging option (English/Spanish) for templates.
+FR-10 The system shall provide a dashboard showing:
+      - total registered volunteers
+      - upcoming shifts and fill rates
+      - attendance rate and no-show rate
+      - volunteer hours by event
+FR-11 The system shall support CSV export of volunteer rosters, schedules, and attendance logs.
+FR-12 The system shall allow coordinators to broadcast announcements to selected volunteer segments (by skill/language/location).
+FR-13 The system shall provide a basic audit log of coordinator actions (event created, shift edited, message sent).
+FR-14 The system shall support data retention settings (e.g., delete inactive volunteer records after X months).
+FR-15 The system shall provide accessibility considerations for web UI (keyboard navigation and readable contrast).
+
+5. Non-Functional Requirements
+NFR-01 The platform shall be accessible via modern browsers on desktop and mobile.
+NFR-02 The platform shall support at least 2,000 registered volunteers.
+NFR-03 The platform shall provide basic error handling and clear user guidance.
+NFR-04 The platform shall ensure that exported data can be downloaded without additional tools.
+
+6. Vendor Response Format
+Vendors should respond with:
+- Summary of solution
+- Compliance matrix mapping each requirement (FR-01...FR-15, NFR-01...NFR-04)
+- Implementation plan with milestones (30/60/90 days)
+- Pricing approach (high-level is acceptable for this sample)
+- Risks and mitigations
+- Support and training approach
+
+7. Evaluation Criteria (Sample)
+- Technical fit and completeness (40%)
+- Implementation feasibility and support (20%)
+- Data handling and auditability (20%)
+- Clarity and quality of response (20%)
