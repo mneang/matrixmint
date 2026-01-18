@@ -296,6 +296,50 @@ if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.inclu
           </div>
         </div>
 
+        {result ? (
+  <>
+    <button
+      style={buttonSecondary}
+      onClick={async () => {
+        const res = await fetch("/api/export?format=md", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ result }),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "matrixmint-proofpack.md";
+        a.click();
+        URL.revokeObjectURL(url);
+      }}
+    >
+      Download Proof Pack (MD)
+    </button>
+
+    <button
+      style={buttonSecondary}
+      onClick={async () => {
+        const res = await fetch("/api/export?format=json", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ result }),
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "matrixmint-proofpack.json";
+        a.click();
+        URL.revokeObjectURL(url);
+      }}
+    >
+      Download JSON
+    </button>
+  </>
+) : null}
+
         <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ ...label, marginBottom: 0 }}>Sample:</span>
           <select
