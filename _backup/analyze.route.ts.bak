@@ -1,0 +1,327 @@
+import { NextResponse } from "next/server";
+
+type CoverageStatus = "Covered" | "Partial" | "Missing";
+
+type RequirementRow = {
+  id: string;
+  category: "Functional" | "NonFunctional";
+  text: string;
+  status: CoverageStatus;
+  responseSummary: string;
+  evidenceIds: string[];
+  evidenceQuotes: string[];
+  gapsOrQuestions: string[];
+  riskFlags: string[];
+};
+
+type MatrixResult = {
+  summary: {
+    totalRequirements: number;
+    coveredCount: number;
+    partialCount: number;
+    missingCount: number;
+    coveragePercent: number;
+    topRisks: string[];
+    nextActions: string[];
+
+    // Optional proof fields (supported if analyze adds them)
+    proofPercent?: number;
+    proofVerifiedCount?: number;
+    proofTotalEvidenceRefs?: number;
+  };
+  requirements: RequirementRow[];
+  proposalOutline: {
+    executiveSummary: string;
+    sections: string[];
+  };
+};
+
+function escPipes(s: string) {
+  return (s ?? "").replace(/\|/g, "\\|");
+}
+
+function todayISO() {
+  // Server-side UTC date is fine; simple and deterministic for judge downloads
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildEvidenceMap(result: MatrixResult) {
+  const evidenceMap = new Map<string, Set<string>>();
+  for (const r of result.requirements ?? []) {
+    for (const ev of r.evidenceIds ?? []) {
+      if (!evidenceMap.has(ev)) evidenceMap.set(ev, new Set());
+      evidenceMap.get(ev)!.add(r.id);
+    }
+  }
+  return evidenceMap;
+}
+
+function renderEvidenceMapLines(result: MatrixResult) {
+  const evidenceMap = buildEvidenceMap(result);
+  return Array.from(evidenceMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([cb, reqs]) => `- **${cb}** → ${Array.from(reqs).sort().join(", ")}`);
+}
+
+function renderMatrixTable(result: MatrixResult) {
+  const matrixRows = (result.requirements ?? [])
+    .map((r) => {
+      const evidence = escPipes(r.evidenceIds?.length ? r.evidenceIds.join(", ") : "—");
+      const reqText = escPipes(r.text);
+      const summary = escPipes(r.responseSummary);
+      const risks = escPipes(r.riskFlags?.length ? r.riskFlags.join("; ") : "—");
+      const gaps = escPipes(r.gapsOrQuestions?.length ? r.gapsOrQuestions.join("; ") : "—");
+      return `| ${r.id} | ${r.category} | ${r.status} | ${reqText} | ${summary} | ${evidence} | ${gaps} | ${risks} |`;
+    })
+    .join("\n");
+
+  return `| ID | Category | Status | Requirement | Response Summary | Evidence IDs | Gaps / Questions | Risk Flags |
+|---|---|---|---|---|---|---|---|
+${matrixRows}`;
+}
+
+function renderExecutiveLetter(result: MatrixResult) {
+  const s = result.summary;
+  const date = todayISO();
+
+  const proofLine =
+    typeof s.proofPercent === "number"
+      ? `- **Proof Integrity:** ${Math.round(s.proofPercent)}% (${s.proofVerifiedCount ?? 0}/${s.proofTotalEvidenceRefs ?? 0} evidence refs verified)`
+      : `- **Proof Integrity:** (not provided)`;
+
+  const topRisks = (s.topRisks ?? []).slice(0, 6);
+  const actions = (s.nextActions ?? []).slice(0, 6);
+
+  // Pull the highest-value evaluator questions: from Partial/Missing gaps
+  const qset = new Set<string>();
+  for (const r of result.requirements ?? []) {
+    if (r.status === "Covered") continue;
+    for (const q of r.gapsOrQuestions ?? []) {
+      const cleaned = String(q || "").trim();
+      if (cleaned) qset.add(cleaned);
+      if (qset.size >= 8) break;
+    }
+    if (qset.size >= 8) break;
+  }
+  const questions = Array.from(qset);
+
+  return `## Executive Compliance Letter (1-page)
+
+**Date:** ${date}  
+**To:** Evaluation Committee / Procurement Lead  
+**From:** MatrixMint (evidence-locked compliance analysis)  
+**Subject:** Evidence-backed compliance summary + risk posture
+
+### Executive Summary (what you can trust)
+- **Coverage:** ${Math.round(s.coveragePercent)}%  
+- **Total Requirements:** ${s.totalRequirements}  
+- **Covered / Partial / Missing:** ${s.coveredCount} / ${s.partialCount} / ${s.missingCount}  
+${proofLine}
+
+### Highest-Impact Risks (ranked)
+${topRisks.length ? topRisks.map((x) => `- ${x}`).join("\n") : "- (none)"}
+
+### Recommended Next Actions (fastest path to close gaps)
+${actions.length ? actions.map((x) => `- ${x}`).join("\n") : "- (none)"}
+
+### Evaluator Follow-up Questions (to de-risk selection)
+${questions.length ? questions.map((x) => `- ${x}`).join("\n") : "- (none)"}
+
+> **Evidence policy:** All “Covered” claims must cite CB-xx evidence. “Partial/Missing” entries include explicit questions to resolve uncertainty.
+`;
+}
+
+function renderGapClosurePlan(result: MatrixResult) {
+  const rows = (result.requirements ?? []).filter((r) => r.status !== "Covered");
+
+  function suggestedArtifacts(r: RequirementRow) {
+    // Deterministic “what would prove it” suggestions based on common procurement patterns + text hints
+    const t = (r.text ?? "").toLowerCase();
+    const risks = (r.riskFlags ?? []).join(" ").toLowerCase();
+
+    const artifacts: string[] = [];
+
+    if (t.includes("sms") || risks.includes("third-party")) {
+      artifacts.push("Integration design (provider options) + config steps");
+      artifacts.push("Sample message templates + opt-in/out behavior");
+      artifacts.push("Test evidence (sandbox logs or screenshots)");
+    }
+
+    if (t.includes("accessibility") || t.includes("contrast") || t.includes("keyboard")) {
+      artifacts.push("Accessibility statement (WCAG 2.1 AA) + contrast audit results");
+      artifacts.push("Keyboard navigation test checklist");
+      artifacts.push("VPAT (if available) or accessibility roadmap");
+    }
+
+    if (t.includes("error handling") || t.includes("user guidance") || t.includes("guidance")) {
+      artifacts.push("UI/UX guidance examples (tooltips, inline validation, empty states)");
+      artifacts.push("Error taxonomy + sample error messages");
+      artifacts.push("Help center / onboarding docs outline");
+    }
+
+    if (t.includes("audit") || t.includes("log")) {
+      artifacts.push("Audit log schema + retention policy");
+      artifacts.push("Sample audit export screenshot or JSON example");
+    }
+
+    if (t.includes("retention") || t.includes("delete")) {
+      artifacts.push("Data retention configuration spec + example policy");
+      artifacts.push("Admin UI screenshot / config walkthrough");
+    }
+
+    if (!artifacts.length) {
+      artifacts.push("Short design note describing the capability");
+      artifacts.push("Screenshot or demo proof of the workflow");
+      artifacts.push("Acceptance criteria + test evidence");
+    }
+
+    // Cap for cleanliness
+    return artifacts.slice(0, 3);
+  }
+
+  const blocks = rows
+    .map((r) => {
+      const evidence = (r.evidenceIds ?? []).length ? r.evidenceIds.join(", ") : "—";
+      const questions = (r.gapsOrQuestions ?? []).length
+        ? (r.gapsOrQuestions ?? []).slice(0, 3).map((x) => `- ${x}`).join("\n")
+        : "- (none)";
+
+      const artifacts = suggestedArtifacts(r).map((x) => `- ${x}`).join("\n");
+      const risk = (r.riskFlags ?? []).length ? r.riskFlags.join("; ") : "—";
+
+      return `### ${r.id} — ${r.status}
+**Requirement:** ${r.text}  
+**Current Read:** ${r.responseSummary}  
+**Evidence:** ${evidence}  
+**Risk Flags:** ${risk}
+
+**Questions to resolve:**
+${questions}
+
+**Suggested proof artifacts to close this gap:**
+${artifacts}
+`;
+    })
+    .join("\n");
+
+  return `## Gap Closure Plan (Partial + Missing)
+
+${rows.length ? blocks : "_No gaps detected. All requirements are Covered._"}
+`;
+}
+
+function renderProposalSkeleton(result: MatrixResult) {
+  const exec = (result.proposalOutline?.executiveSummary ?? "").trim();
+  const sections = (result.proposalOutline?.sections ?? []).filter(Boolean);
+
+  const sectionBlocks = sections.length
+    ? sections
+        .map((s, i) => {
+          const title = String(s).replace(/^\s*\d+(\.\d+)*\s*\.\s*/, "").trim() || `Section ${i + 1}`;
+          return `### ${i + 1}. ${title}
+- **What we will deliver:** _(bullet list)_
+- **How it maps to requirements:** _(reference FR/NFR IDs)_
+- **Evidence references:** _(CB-xx IDs, if applicable)_
+- **Risks & mitigations:** _(short bullets)_
+`;
+        })
+        .join("\n")
+    : `### 1. Executive Summary
+- _(Add key benefits and compliance highlights)_
+
+### 2. Compliance Matrix
+- _(Attach the table + evidence map)_
+
+### 3. Implementation Plan
+- _(30/60/90 day milestones)_
+`;
+
+  return `## Proposal Draft Skeleton (copy/paste starter)
+
+### Executive Summary (draft)
+${exec || "_(No executive summary provided.)_"}
+
+${sectionBlocks}
+
+> Tip: For final demo, generate this with **Gemini 3 Pro**, then export MD as your “proposal starter kit.”
+`;
+}
+
+function toMarkdown(result: MatrixResult) {
+  const s = result.summary;
+
+  const evidenceLines = renderEvidenceMapLines(result);
+  const matrixTable = renderMatrixTable(result);
+
+  const proofIntegrity =
+    typeof s.proofPercent === "number"
+      ? `- **Proof Integrity:** ${Math.round(s.proofPercent)}% (${s.proofVerifiedCount ?? 0}/${s.proofTotalEvidenceRefs ?? 0} evidence refs verified)`
+      : "";
+
+  return `# MatrixMint — Compliance Proof Pack
+
+## Summary
+- **Coverage:** ${Math.round(s.coveragePercent)}%
+- **Total:** ${s.totalRequirements}
+- **Covered:** ${s.coveredCount}
+- **Partial:** ${s.partialCount}
+- **Missing:** ${s.missingCount}
+${proofIntegrity}
+
+## Top Risks
+${(s.topRisks ?? []).map((x) => `- ${x}`).join("\n") || "- (none)"}
+
+## Next Actions
+${(s.nextActions ?? []).map((x) => `- ${x}`).join("\n") || "- (none)"}
+
+## Evidence Map (Capability Brief → Requirements)
+${evidenceLines.join("\n") || "- (no evidence links)"}
+
+## Compliance Matrix
+${matrixTable}
+
+## Proposal Outline — Executive Summary
+${result.proposalOutline.executiveSummary}
+
+## Proposal Outline — Sections
+${(result.proposalOutline.sections ?? []).map((x, i) => `${i + 1}. ${x}`).join("\n")}
+
+${renderExecutiveLetter(result)}
+
+${renderGapClosurePlan(result)}
+
+${renderProposalSkeleton(result)}
+`;
+}
+
+export async function POST(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const format = (url.searchParams.get("format") ?? "md").toLowerCase();
+
+    const body = (await req.json()) as { result: MatrixResult };
+    const result = body?.result;
+
+    if (!result) {
+      return NextResponse.json({ ok: false, error: "Missing result payload" }, { status: 400 });
+    }
+
+    if (format === "json") {
+      return NextResponse.json(result, {
+        headers: {
+          "Content-Disposition": `attachment; filename="matrixmint-proofpack.json"`,
+        },
+      });
+    }
+
+    const md = toMarkdown(result);
+    return new NextResponse(md, {
+      headers: {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": `attachment; filename="matrixmint-proofpack.md"`,
+      },
+    });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? "Export failed" }, { status: 500 });
+  }
+}

@@ -23,10 +23,16 @@ export const matrixResultSchema = z.object({
     coveragePercent: z.number().min(0).max(100),
     topRisks: z.array(z.string()).describe("Top 3–6 risks discovered."),
     nextActions: z.array(z.string()).describe("Top 3–6 next actions to close gaps."),
+    proofVerifiedCount: z.number(),
+    proofTotalEvidenceRefs: z.number(),
+    proofPercent: z.number(),
+    proofNotes: z.array(z.string()),
   }),
   requirements: z.array(requirementSchema),
   proposalOutline: z.object({
     executiveSummary: z.string().describe("Short executive summary tailored to the RFP."),
     sections: z.array(z.string()).describe("Proposal section headings."),
+    evidenceVerified: z.boolean(),
+    evidenceVerificationNotes: z.array(z.string()),
   }),
 });
