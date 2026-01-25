@@ -8,7 +8,7 @@ import path from "path";
 import { promises as fs } from "fs";
 import { matrixResultSchema } from "@/lib/matrixSchema";
 
-// ThinkingLevel enum availability varies across SDK builds.
+// --------- Thinking level compat ----------
 let THINKING_LEVEL: any = "HIGH";
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -18,6 +18,7 @@ try {
   // ignore
 }
 
+// --------- Types ----------
 type AnalyzeBody = {
   rfpText: string;
   capabilityText: string;
@@ -51,7 +52,6 @@ type MatrixResult = {
     proofPercent?: number;
     proofVerifiedCount?: number;
     proofTotalEvidenceRefs?: number;
-
     proofNotes?: string[];
   };
   requirements: RequirementRow[];
@@ -66,12 +66,12 @@ type CacheMeta = {
   key?: string;
   ageSeconds?: number;
   source?: "memory" | "disk" | "none";
+  lane?: "main" | "offline";
 };
 
 type QuotaMeta = {
   blocked: boolean;
   blockedUntilUnixMs: number;
-  retryAfterSeconds: number;
   lastError: string;
 };
 
@@ -84,28 +84,100 @@ type AnalyzeMeta = {
   quota?: QuotaMeta;
 };
 
+// --------- Caching ----------
 const RESULT_CACHE = new Map<string, { data: MatrixResult; savedAt: number }>();
-
 const CACHE_DIR = path.join(process.cwd(), ".matrixmint_cache");
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+const CACHE_VERSION = "v4"; // bumped due to cache lane change
 
-// IMPORTANT: bump this if you change offline logic, proof verifier rules, prompt rules, schema, etc.
-// Keeps cache deterministic & avoids "poisoned" old cache after logic changes.
-const CACHE_VERSION = "v3.1";
-
-let QUOTA_BLOCKED_UNTIL_MS = 0;
-let QUOTA_LAST_ERROR = "";
-
-function nowMs() {
-  return Date.now();
+async function ensureCacheDir() {
+  await fs.mkdir(CACHE_DIR, { recursive: true });
 }
 
+function cachePathForKey(key: string) {
+  return path.join(CACHE_DIR, `${key}.json`);
+}
+
+async function deleteDiskCache(key: string) {
+  try {
+    const p = cachePathForKey(key);
+    await fs.rm(p, { force: true });
+  } catch {
+    // ignore
+  }
+}
+
+async function readDiskCache(key: string): Promise<{ data: MatrixResult; savedAt: number } | null> {
+  try {
+    await ensureCacheDir();
+    const p = cachePathForKey(key);
+    const raw = await fs.readFile(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed?.data || typeof parsed?.savedAt !== "number") return null;
+
+    if (Date.now() - parsed.savedAt > CACHE_TTL_MS) return null;
+
+    matrixResultSchema.parse(parsed.data);
+    return { data: parsed.data as MatrixResult, savedAt: parsed.savedAt as number };
+  } catch {
+    return null;
+  }
+}
+
+async function writeDiskCache(key: string, data: MatrixResult) {
+  await ensureCacheDir();
+  const p = cachePathForKey(key);
+  const tmp = `${p}.tmp`;
+  const payload = JSON.stringify({ savedAt: Date.now(), data }, null, 2);
+  await fs.writeFile(tmp, payload, "utf8");
+  await fs.rename(tmp, p);
+}
+
+// --------- Quota circuit breaker ----------
+const QUOTA_STATE: Record<string, QuotaMeta> = {
+  global: { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
+  "gemini-3-flash-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
+  "gemini-3-pro-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
+};
+
+function getQuotaState(model: string): QuotaMeta {
+  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
+  const now = Date.now();
+  if (m.blocked && m.blockedUntilUnixMs <= now) {
+    m.blocked = false;
+    m.blockedUntilUnixMs = 0;
+    m.lastError = "";
+  }
+  return { ...m };
+}
+
+function setQuotaBlocked(model: string, blockedUntilUnixMs: number, lastError: string) {
+  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
+  m.blocked = true;
+  m.blockedUntilUnixMs = Math.max(blockedUntilUnixMs, Date.now() + 10_000);
+  m.lastError = lastError || "";
+  QUOTA_STATE[model] = m;
+}
+
+function parseRetryDelayMs(details: any): number {
+  const retryDelay = details?.error?.details?.find?.((d: any) =>
+    String(d?.["@type"] || "").includes("RetryInfo")
+  )?.retryDelay;
+
+  if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
+    const secs = Number(retryDelay.replace("s", ""));
+    if (Number.isFinite(secs) && secs > 0) return Math.min(120_000, secs * 1000);
+  }
+  return 15_000;
+}
+
+// --------- Helpers ----------
 function sha256(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+function normalizeText(s: string) {
+  return (s ?? "").replace(/\r/g, "").trim();
 }
 
 function uniqStrings(arr: any[]) {
@@ -119,40 +191,6 @@ function uniqStrings(arr: any[]) {
     out.push(v);
   }
   return out;
-}
-
-async function ensureCacheDir() {
-  await fs.mkdir(CACHE_DIR, { recursive: true });
-}
-
-function cachePathForKey(key: string) {
-  return path.join(CACHE_DIR, `${key}.json`);
-}
-
-async function readDiskCache(key: string): Promise<{ data: MatrixResult; savedAt: number } | null> {
-  try {
-    await ensureCacheDir();
-    const p = cachePathForKey(key);
-    const raw = await fs.readFile(p, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed?.data || typeof parsed?.savedAt !== "number") return null;
-
-    if (nowMs() - parsed.savedAt > CACHE_TTL_MS) return null;
-
-    matrixResultSchema.parse(parsed.data);
-    return { data: parsed.data as MatrixResult, savedAt: parsed.savedAt as number };
-  } catch {
-    return null;
-  }
-}
-
-async function writeDiskCache(key: string, data: MatrixResult) {
-  await ensureCacheDir();
-  const p = cachePathForKey(key);
-  const tmp = `${p}.tmp`;
-  const payload = JSON.stringify({ savedAt: nowMs(), data }, null, 2);
-  await fs.writeFile(tmp, payload, "utf8");
-  await fs.rename(tmp, p);
 }
 
 function normalizeForMatch(s: string) {
@@ -202,6 +240,21 @@ function quoteExistsInText(quote: string, text: string) {
   return false;
 }
 
+function safeJsonParse(raw: string) {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) throw new Error("Empty model response");
+
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return JSON.parse(trimmed);
+
+  const first = trimmed.indexOf("{");
+  const last = trimmed.lastIndexOf("}");
+  if (first !== -1 && last !== -1 && last > first) {
+    return JSON.parse(trimmed.slice(first, last + 1));
+  }
+
+  return JSON.parse(trimmed);
+}
+
 function buildPrompt(rfpText: string, capabilityText: string) {
   return `
 You are MatrixMint, an RFP compliance analyst.
@@ -215,21 +268,13 @@ NON-NEGOTIABLE RULES:
 2) "Covered" requires:
    - evidenceIds is non-empty
    - evidenceQuotes aligns with those CB-xx IDs
-3) If requirement mentions SMS reminders and Capability Brief says "not included by default",
-   status MUST be "Partial" and riskFlags must include "Third-party dependency".
-4) Extract all requirements:
-   - Prefer explicit IDs: FR-01.., NFR-01..
-   - If no ID, generate GEN-01, GEN-02...
-5) For Partial/Missing: include 1–3 gapsOrQuestions.
-6) responseSummary: 1–3 short, business-readable sentences.
-7) proposalOutline must align to the RFP response format and be actionable.
-8) Outputs must be English.
-9) OUTPUT MUST BE A SINGLE JSON OBJECT. No markdown. No commentary.
+3) For Partial/Missing: include 1–3 gapsOrQuestions.
+4) responseSummary: 1–3 short, business-readable sentences.
+5) proposalOutline must be actionable.
+6) Outputs must be English.
+7) OUTPUT MUST BE A SINGLE JSON OBJECT. No markdown.
 
-QUALITY BAR:
-- Be conservative. When unclear, choose Partial with a question.
-- Keep evidenceQuotes short; reference CB-xx precisely.
-- Avoid fluff. Precision wins.
+Be conservative. When unclear, choose Partial with a question.
 
 INPUTS:
 === RFP TEXT ===
@@ -248,113 +293,29 @@ function buildStrictRetryPrompt(basePrompt: string) {
 STRICT MODE:
 - Return ONLY valid JSON (single object).
 - Do not wrap in \`\`\`.
-- Do not include any extra keys outside the required structure.
-- If uncertain, still return the full structure with conservative values.
+- Do not include commentary.
 `
   );
-}
-
-function safeJsonParse(raw: string) {
-  const trimmed = (raw ?? "").trim();
-  if (!trimmed) throw new Error("Empty model response");
-
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return JSON.parse(trimmed);
-
-  const first = trimmed.indexOf("{");
-  const last = trimmed.lastIndexOf("}");
-  if (first !== -1 && last !== -1 && last > first) {
-    return JSON.parse(trimmed.slice(first, last + 1));
-  }
-
-  return JSON.parse(trimmed);
-}
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 function isOverloadedError(err: any) {
   const msg = String(err?.message ?? "");
   const status = err?.status || err?.error?.status;
   const code = err?.code || err?.error?.code;
-
-  return (
-    status === "UNAVAILABLE" ||
-    code === 503 ||
-    msg.includes("overloaded") ||
-    msg.includes("UNAVAILABLE") ||
-    msg.includes("503")
-  );
+  return status === "UNAVAILABLE" || code === 503 || msg.includes("overloaded") || msg.includes("503");
 }
 
 function isQuotaExceededError(err: any) {
   const msg = String(err?.message ?? "");
   const status = err?.status || err?.error?.status;
   const code = err?.code || err?.error?.code;
-
   return (
     status === "RESOURCE_EXHAUSTED" ||
     code === 429 ||
-    msg.includes("RESOURCE_EXHAUSTED") ||
     msg.toLowerCase().includes("quota exceeded") ||
     msg.toLowerCase().includes("exceeded your current quota") ||
     msg.toLowerCase().includes("rate limit")
   );
-}
-
-function parseRetryAfterSecondsFromError(err: any): number {
-  // Gemini error often embeds retryDelay like "33s" or "15s" in details.
-  try {
-    const raw = err?.message ?? err?.error?.message ?? "";
-    const s = String(raw);
-
-    // direct "Please retry in 15.47s"
-    const m1 = s.match(/retry in\s+([\d.]+)s/i);
-    if (m1) return Math.max(1, Math.ceil(Number(m1[1])));
-
-    // google.rpc.RetryInfo: retryDelay:"33s"
-    const m2 = s.match(/retryDelay"\s*:\s*"(\d+)s/i);
-    if (m2) return Math.max(1, Number(m2[1]));
-
-    // sometimes the stringified JSON is attached in meta.quota.lastError
-    const m3 = s.match(/"retryDelay"\s*:\s*"(\d+)s"/i);
-    if (m3) return Math.max(1, Number(m3[1]));
-  } catch {
-    // ignore
-  }
-  return 0;
-}
-
-function setQuotaCooldownFromError(err: any) {
-  const retryAfter = parseRetryAfterSecondsFromError(err);
-  const cooldownMs =
-    retryAfter > 0
-      ? (retryAfter + 2) * 1000 // small buffer so we don't hammer at boundary
-      : 2 * 60 * 1000; // fallback if Gemini didn't give a retry delay: 2 minutes
-
-  QUOTA_BLOCKED_UNTIL_MS = Math.max(QUOTA_BLOCKED_UNTIL_MS, nowMs() + cooldownMs);
-  QUOTA_LAST_ERROR = safeStringifyErr(err);
-}
-
-function safeStringifyErr(err: any) {
-  try {
-    if (typeof err === "string") return err;
-    if (err?.message && typeof err.message === "string") return err.message;
-    return JSON.stringify(err);
-  } catch {
-    return String(err ?? "");
-  }
-}
-
-function getQuotaMeta(): QuotaMeta {
-  const blocked = nowMs() < QUOTA_BLOCKED_UNTIL_MS;
-  const retryAfterSeconds = blocked ? Math.max(0, Math.ceil((QUOTA_BLOCKED_UNTIL_MS - nowMs()) / 1000)) : 0;
-  return {
-    blocked,
-    blockedUntilUnixMs: blocked ? QUOTA_BLOCKED_UNTIL_MS : 0,
-    retryAfterSeconds,
-    lastError: QUOTA_LAST_ERROR || "",
-  };
 }
 
 async function extractResponseText(resp: any): Promise<string> {
@@ -367,7 +328,7 @@ async function extractResponseText(resp: any): Promise<string> {
       const s = typeof (v as any)?.then === "function" ? await v : v;
       if (typeof s === "string") return s;
     } catch {
-      // continue
+      // ignore
     }
   }
 
@@ -386,6 +347,10 @@ async function extractResponseText(resp: any): Promise<string> {
   return "";
 }
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function generateWithRetries(params: {
   ai: GoogleGenAI;
   model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
@@ -395,9 +360,7 @@ async function generateWithRetries(params: {
 }) {
   const { ai, model, prompt, jsonSchema, thinkingLevel } = params;
 
-  const maxAttempts = Number(process.env.MAX_RETRIES ?? "4");
-  const baseDelay = Number(process.env.RETRY_BASE_MS ?? "250");
-
+  const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await ai.models.generateContent({
@@ -413,18 +376,14 @@ async function generateWithRetries(params: {
         } as any,
       });
     } catch (err: any) {
-      if (isQuotaExceededError(err)) {
-        setQuotaCooldownFromError(err);
-        throw err;
-      }
+      if (isQuotaExceededError(err)) throw err;
       if (!isOverloadedError(err) || attempt === maxAttempts) throw err;
 
-      const wait = baseDelay + attempt * attempt * 150; // quadratic backoff
+      const wait = 250 + attempt * attempt * 150;
       console.log(`MatrixMint: ${model} overloaded. Retry ${attempt}/${maxAttempts} in ${wait}ms`);
       await sleep(wait);
     }
   }
-
   throw new Error("Retry loop fell through unexpectedly");
 }
 
@@ -503,217 +462,176 @@ async function generateParseValidate(params: {
   return parsed as MatrixResult;
 }
 
+// --------- Deterministic OFFLINE analyzer ----------
 function offlineAnalyze(rfpText: string, capabilityText: string): MatrixResult {
-  const rfp = rfpText.replace(/\r/g, "");
-  const cap = capabilityText.replace(/\r/g, "");
+  const lines = rfpText.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  const reqLines = rfp.split("\n").map((l) => l.trim()).filter(Boolean);
+  const idLineRe = /\b(FR|NFR|REQ|RFP|SEC)[-_ ]?(\d{1,3})\b/i;
+  const picked: Array<{ id: string; category: "Functional" | "NonFunctional"; text: string }> = [];
 
-  const reqs: Array<{ id: string; text: string; category: "Functional" | "NonFunctional" }> = [];
-  const seen = new Set<string>();
-
-  for (let i = 0; i < reqLines.length; i++) {
-    const line = reqLines[i];
-    const m = line.match(/\b(FR-\d+|NFR-\d+)\b/);
-    if (!m) continue;
-
-    const id = m[1];
-    if (seen.has(id)) continue;
-    seen.add(id);
-
-    let text = line;
-    const after = line.split(id)[1]?.trim() ?? "";
-    if (after && after.length >= 10) text = after.replace(/^[:\-|]\s*/, "").trim();
-
-    if (!text || text.length < 10) {
-      const next = reqLines[i + 1] ?? "";
-      if (next && next.length >= 10) text = next;
-    }
-
-    const category = id.startsWith("NFR-") ? "NonFunctional" : "Functional";
-    reqs.push({ id, text, category });
-  }
-
-  if (!reqs.length) {
-    const shallLines = reqLines.filter((l) => /\bshall\b/i.test(l));
-    let idx = 1;
-    for (const l of shallLines.slice(0, 30)) {
-      const id = `GEN-${String(idx).padStart(2, "0")}`;
-      reqs.push({ id, text: l, category: "Functional" });
-      idx += 1;
+  for (const ln of lines) {
+    const m = ln.match(idLineRe);
+    if (m) {
+      const prefix = m[1].toUpperCase();
+      const num = String(m[2]).padStart(2, "0");
+      const id = `${prefix}-${num}`;
+      const category: "Functional" | "NonFunctional" = prefix === "NFR" ? "NonFunctional" : "Functional";
+      const text = ln.replace(/\s+/g, " ").slice(0, 240);
+      picked.push({ id, category, text });
     }
   }
 
-  const cbBlocks: Array<{ id: string; snippet: string }> = [];
-  const cbMatches = Array.from(cap.matchAll(/\bCB-\d{2}\b/g))
-    .map((m) => m.index ?? -1)
-    .filter((x) => x >= 0);
-
-  if (cbMatches.length) {
-    for (const idx of cbMatches) {
-      const id = cap.slice(idx, idx + 5);
-      const start = idx;
-      const end = cap.indexOf("\n", start);
-      const line = (end === -1 ? cap.slice(start) : cap.slice(start, end)).trim();
-
-      let snippet = line;
-      if (snippet === id) snippet = cap.slice(start, start + 240).replace(/\s+/g, " ").trim();
-
-      cbBlocks.push({ id, snippet });
+  if (!picked.length) {
+    const bullets = lines.filter((l) => /^[-*•]/.test(l) || /^\d+\./.test(l)).slice(0, 18);
+    for (let i = 0; i < bullets.length; i++) {
+      const id = `GEN-${String(i + 1).padStart(2, "0")}`;
+      const text = bullets[i].replace(/^[-*•]\s*/, "").replace(/^\d+\.\s*/, "").slice(0, 240);
+      picked.push({ id, category: "Functional", text });
     }
-  } else {
-    cbBlocks.push({ id: "CB-00", snippet: cap.slice(0, 300).replace(/\s+/g, " ").trim() });
   }
 
-  function tokenize(s: string) {
-    return normalizeForMatch(s)
-      .replace(/[^a-z0-9\s-]/g, " ")
-      .split(/\s+/)
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .filter((w) => w.length >= 3)
-      .filter((w) => !["the", "and", "for", "with", "that", "this", "shall", "will", "are", "not", "into"].includes(w));
-  }
-
-  function bestEvidenceFor(reqText: string) {
-    const rt = new Set(tokenize(reqText));
-    let best: { id: string; snippet: string; score: number } | null = null;
-
-    for (const b of cbBlocks) {
-      const bt = tokenize(b.snippet);
-      let score = 0;
-      for (const w of bt) if (rt.has(w)) score += 1;
-      if (!best || score > best.score) best = { id: b.id, snippet: b.snippet, score };
-    }
-    return best;
-  }
-
+  const cbIds = Array.from(capabilityText.matchAll(/\bCB-\d+\b/g)).map((m) => m[0]);
+  const cbUnique = Array.from(new Set(cbIds));
   const capNorm = normalizeForMatch(capabilityText);
 
-  const rows: RequirementRow[] = reqs.map((r) => {
-    const reqText = r.text || r.id;
-    const reqNorm = normalizeForMatch(reqText);
+  function keywordScore(reqText: string) {
+    const w = normalizeForMatch(reqText)
+      .replace(/[^a-z0-9 ]/g, " ")
+      .split(" ")
+      .filter((x) => x.length >= 5)
+      .slice(0, 14);
 
-    const mentionsSms = reqNorm.includes("sms");
-    const capSaysNotIncluded = capNorm.includes("sms") && capNorm.includes("not included");
+    let hits = 0;
+    for (const k of w) {
+      if (capNorm.includes(k)) hits++;
+    }
+    return { hits, total: w.length };
+  }
 
-    const ev = bestEvidenceFor(reqText);
-    const score = ev?.score ?? 0;
+  const requirements: RequirementRow[] = picked.slice(0, 18).map((r) => {
+    const ks = keywordScore(r.text);
+    const ratio = ks.total === 0 ? 0 : ks.hits / ks.total;
 
-    let status: CoverageStatus = "Partial";
-    let evidenceIds: string[] = [];
-    let evidenceQuotes: string[] = [];
-    let riskFlags: string[] = [];
-    let gapsOrQuestions: string[] = [];
+    let status: CoverageStatus = "Missing";
+    if (ratio >= 0.35 && cbUnique.length) status = "Partial";
+    if (ratio >= 0.55 && cbUnique.length >= 1) status = "Covered";
 
-    if (mentionsSms && capSaysNotIncluded) {
-      status = "Partial";
-      riskFlags.push("Third-party dependency");
-      gapsOrQuestions.push("Which third-party SMS provider will be used for integration?");
-      gapsOrQuestions.push("Will the organization provide API credentials for the SMS provider?");
-      const smsEv = cbBlocks.find((b) => normalizeForMatch(b.snippet).includes("sms")) ?? ev;
-      if (smsEv) {
-        evidenceIds = [smsEv.id];
-        evidenceQuotes = [smsEv.snippet.slice(0, 160)];
-      }
-    } else if (score >= 2 && ev) {
-      status = "Covered";
-      evidenceIds = [ev.id];
-      evidenceQuotes = [ev.snippet.slice(0, 160)];
-    } else if (score === 1 && ev) {
-      status = "Partial";
-      evidenceIds = [ev.id];
-      evidenceQuotes = [ev.snippet.slice(0, 160)];
-      gapsOrQuestions.push("Can you confirm the exact workflow details and constraints for this requirement?");
-      riskFlags.push("Ambiguity");
-    } else {
-      status = "Partial";
-      gapsOrQuestions.push("The capability brief does not explicitly confirm this requirement. Provide supporting evidence or documentation.");
-      riskFlags.push("Weak evidence");
+    const evidenceIds = status === "Covered" ? cbUnique.slice(0, 1) : [];
+    const evidenceQuotes =
+      status === "Covered"
+        ? [
+            (() => {
+              const id = cbUnique[0];
+              const idx = capabilityText.indexOf(id);
+              if (idx === -1) return id;
+              const start = Math.max(0, idx - 80);
+              const end = Math.min(capabilityText.length, idx + 140);
+              return capabilityText.slice(start, end).replace(/\s+/g, " ").trim();
+            })(),
+          ]
+        : [];
+
+    const gaps: string[] = [];
+    const risks: string[] = [];
+
+    if (status !== "Covered") {
+      gaps.push("Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.");
+      gaps.push("If mandatory, provide preferred implementation constraints (hosting, integrations, data retention).");
+    }
+
+    if (status === "Missing") {
+      risks.push("Ambiguity");
+      risks.push("Scope gap");
+    } else if (status === "Partial") {
+      risks.push("Ambiguity");
+      risks.push("Implementation risk");
     }
 
     const responseSummary =
       status === "Covered"
-        ? "Supported based on the capability brief evidence cited."
-        : "Supported in part or requires confirmation based on available evidence.";
+        ? "Covered with evidence-backed capability in the provided brief."
+        : status === "Partial"
+        ? "Partially aligned based on keyword overlap; confirmation and scope details required."
+        : "Not evidenced in the capability brief; likely requires additional build or third-party support.";
 
     return {
       id: r.id,
       category: r.category,
-      text: reqText,
+      text: r.text,
       status,
       responseSummary,
       evidenceIds,
       evidenceQuotes,
-      gapsOrQuestions: gapsOrQuestions.slice(0, 3),
-      riskFlags: uniqStrings(riskFlags),
+      gapsOrQuestions: gaps,
+      riskFlags: risks,
     };
   });
 
-  const total = rows.length;
-  const coveredCount = rows.filter((x) => x.status === "Covered").length;
-  const partialCount = rows.filter((x) => x.status === "Partial").length;
-  const missingCount = rows.filter((x) => x.status === "Missing").length;
+  const total = requirements.length;
+  const coveredCount = requirements.filter((x) => x.status === "Covered").length;
+  const partialCount = requirements.filter((x) => x.status === "Partial").length;
+  const missingCount = requirements.filter((x) => x.status === "Missing").length;
   const coveragePercent = total ? (coveredCount / total) * 100 : 0;
 
-  const topRisks = uniqStrings(rows.flatMap((r) => r.riskFlags ?? []).filter(Boolean)).slice(0, 8);
-  const nextActions = uniqStrings(rows.filter((r) => r.status !== "Covered").flatMap((r) => r.gapsOrQuestions ?? [])).slice(0, 8);
+  const topRisks = uniqStrings(requirements.flatMap((r) => r.riskFlags).slice(0, 10));
+
+  const nextActions = [
+    "Confirm scope priorities and any mandatory go-live constraints (timeline, hosting, integrations).",
+    "Provide a system architecture diagram and data-flow overview for evaluator review.",
+    "Produce a risk mitigation plan for all Partial/Missing requirements with owners and target dates.",
+    "Generate a clarifications email and align on acceptance criteria for each ambiguous requirement.",
+  ];
 
   const proposalOutline = {
     executiveSummary:
-      "MatrixMint provides a proof-locked compliance analysis that maps each requirement to verifiable capability evidence, producing bid-ready exports with conservative coverage classification.",
+      "MatrixMint delivers a compliance-first workflow that maps RFP requirements to verifiable capability evidence, producing bid-ready artifacts and reducing procurement risk through proof-anchored traceability.",
     sections: [
-      "1. Solution Overview and Approach",
-      "2. Compliance Matrix and Evidence Mapping",
-      "3. Risk Register and Mitigation Plan",
-      "4. Clarifications and Open Questions",
-      "5. Implementation Plan and Milestones",
-      "6. Support, Training, and Adoption",
+      "Problem & Procurement Risk",
+      "Solution Overview (MatrixMint Workflow)",
+      "Compliance Matrix (Evidence-Anchored)",
+      "Implementation Plan (30/60/90)",
+      "Security, Privacy, and Reliability",
+      "Risks, Clarifications, and Mitigations",
+      "Support, Training, and Adoption",
+      "Pricing & Licensing (placeholder)",
+      "Appendix: Proof Pack & Evidence Quotes",
     ],
   };
 
-  const withProof = computeProof(
-    {
-      summary: {
-        totalRequirements: total,
-        coveredCount,
-        partialCount,
-        missingCount,
-        coveragePercent,
-        topRisks,
-        nextActions,
-      },
-      requirements: rows,
-      proposalOutline,
+  return {
+    summary: {
+      totalRequirements: total,
+      coveredCount,
+      partialCount,
+      missingCount,
+      coveragePercent,
+      topRisks,
+      nextActions,
+      proofNotes: ["Offline deterministic analysis used (conservative coverage scoring)."],
     },
-    capabilityText
-  );
-
-  withProof.summary.coveragePercent = clamp(withProof.summary.coveragePercent, 0, 100);
-  withProof.summary.proofNotes = uniqStrings([
-    ...(withProof.summary.proofNotes ?? []),
-    "Offline mode: deterministic matching between requirements and capability evidence via keyword overlap (conservative).",
-    "No capabilities are asserted without attaching a direct capability snippet as evidence.",
-  ]);
-
-  return withProof;
+    requirements,
+    proposalOutline,
+  };
 }
 
+// --------- Route ----------
 export async function POST(req: Request) {
   const meta: AnalyzeMeta = {
     modelRequested: "unknown",
     modelUsed: "unknown",
     fallbackUsed: "none",
     warnings: [],
-    cache: { hit: false, source: "none" },
-    quota: getQuotaMeta(),
+    cache: { hit: false, source: "none", lane: "main" },
+    quota: getQuotaState("global"),
   };
 
   try {
     const body = (await req.json()) as Partial<AnalyzeBody>;
-    const rfpText = (body.rfpText ?? "").trim();
-    const capabilityText = (body.capabilityText ?? "").trim();
-    const requestedModel = body.model ?? "gemini-3-flash-preview";
+    const rfpText = normalizeText(body.rfpText ?? "");
+    const capabilityText = normalizeText(body.capabilityText ?? "");
+    const requestedModel = (body.model ?? "gemini-3-flash-preview") as
+      | "gemini-3-flash-preview"
+      | "gemini-3-pro-preview";
 
     meta.modelRequested = requestedModel;
 
@@ -724,50 +642,52 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "rfpText and capabilityText are required" }, { status: 400 });
     }
 
-    // Headers (control plane)
-    const h = new Headers(req.headers);
-    const forceMode = (h.get("x-matrixmint-mode") || "").trim().toLowerCase(); // "", "live", "cache", "offline"
-    const bustCache = (h.get("x-matrixmint-bust-cache") || "").trim() === "1";
-    const clearCache = (h.get("x-matrixmint-clear-cache") || "").trim() === "1";
+    const h = req.headers;
+    const modeRaw = String(h.get("x-matrixmint-mode") || "auto").toLowerCase();
+    const mode = (["auto", "live", "cache", "offline"].includes(modeRaw) ? modeRaw : "auto") as
+      | "auto"
+      | "live"
+      | "cache"
+      | "offline";
 
-    // Build stable cache key (include version + requested model + inputs)
-    const cacheKey = sha256(`${CACHE_VERSION}\n${requestedModel}\n---\n${rfpText}\n---\n${capabilityText}`);
-    meta.cache = { hit: false, key: cacheKey, source: "none" };
-    meta.quota = getQuotaMeta();
+    const bustCache = String(h.get("x-matrixmint-bust-cache") || "") === "1";
+    const clearCache = String(h.get("x-matrixmint-clear-cache") || "") === "1";
 
-    // Clear only this key (memory + disk)
+    if (mode === "offline") meta.warnings?.push("Forced offline (x-matrixmint-mode=offline).");
+    if (mode === "cache") meta.warnings?.push("Cache-preferred mode (x-matrixmint-mode=cache).");
+    if (mode === "live") meta.warnings?.push("Live-preferred mode (x-matrixmint-mode=live).");
+    if (bustCache) meta.warnings?.push("Cache bust enabled; bypassing memory+disk cache.");
+
+    // ✅ Cache lane isolation:
+    // - offline lane only for forced offline requests or offline fallback saves
+    // - main lane for normal operation
+    const cacheLane: "main" | "offline" = mode === "offline" ? "offline" : "main";
+    meta.cache = { hit: false, source: "none", lane: cacheLane };
+
+    const cacheKey = sha256(
+      `${CACHE_VERSION}\nlane=${cacheLane}\n${requestedModel}\n${rfpText}\n---\n${capabilityText}`
+    );
+    meta.cache.key = cacheKey;
+
     if (clearCache) {
       RESULT_CACHE.delete(cacheKey);
-      try {
-        await ensureCacheDir();
-        await fs.unlink(cachePathForKey(cacheKey));
-      } catch {
-        // ignore
-      }
+      await deleteDiskCache(cacheKey);
       meta.warnings?.push("Cache cleared for this input key.");
     }
 
-    // Forced modes
-    if (forceMode === "offline") {
-      meta.warnings?.push("Forced offline (x-matrixmint-mode=offline).");
-      const offline = offlineAnalyze(rfpText, capabilityText);
-      RESULT_CACHE.set(cacheKey, { data: offline, savedAt: nowMs() });
-      await writeDiskCache(cacheKey, offline);
-      meta.modelUsed = "offline";
-      meta.fallbackUsed = "offline";
-      meta.cache = { hit: false, key: cacheKey, source: "none" };
-      meta.quota = getQuotaMeta();
-      return NextResponse.json({ ok: true, data: offline, meta });
-    }
-
-    if (forceMode === "cache") {
-      // Cache-only: do NOT run model, do NOT run offline generation.
+    if (!bustCache && mode !== "offline") {
       const mem = RESULT_CACHE.get(cacheKey);
       if (mem) {
         meta.modelUsed = "cache";
         meta.fallbackUsed = "cache";
-        meta.cache = { hit: true, key: cacheKey, source: "memory", ageSeconds: Math.round((nowMs() - mem.savedAt) / 1000) };
-        meta.quota = getQuotaMeta();
+        meta.cache = {
+          hit: true,
+          key: cacheKey,
+          source: "memory",
+          ageSeconds: Math.round((Date.now() - mem.savedAt) / 1000),
+          lane: cacheLane,
+        };
+        meta.quota = getQuotaState(requestedModel);
         return NextResponse.json({ ok: true, data: mem.data, meta });
       }
 
@@ -776,71 +696,51 @@ export async function POST(req: Request) {
         RESULT_CACHE.set(cacheKey, disk);
         meta.modelUsed = "cache";
         meta.fallbackUsed = "cache";
-        meta.cache = { hit: true, key: cacheKey, source: "disk", ageSeconds: Math.round((nowMs() - disk.savedAt) / 1000) };
-        meta.quota = getQuotaMeta();
-        return NextResponse.json({ ok: true, data: disk.data, meta });
-      }
-
-      return NextResponse.json(
-        { ok: false, error: "Cache-only mode: no cached result for this input key.", meta },
-        { status: 404 }
-      );
-    }
-
-    if (bustCache) {
-      meta.warnings?.push("Cache bust enabled; bypassing memory+disk cache.");
-    }
-
-    // Normal path (auto or live): try cache first unless bustCache
-    if (!bustCache) {
-      const mem = RESULT_CACHE.get(cacheKey);
-      if (mem) {
-        meta.modelUsed = "cache";
-        meta.fallbackUsed = "cache";
-        meta.cache = { hit: true, key: cacheKey, source: "memory", ageSeconds: Math.round((nowMs() - mem.savedAt) / 1000) };
-        meta.quota = getQuotaMeta();
-        return NextResponse.json({ ok: true, data: mem.data, meta });
-      }
-
-      const disk = await readDiskCache(cacheKey);
-      if (disk) {
-        RESULT_CACHE.set(cacheKey, disk);
-        meta.modelUsed = "cache";
-        meta.fallbackUsed = "cache";
-        meta.cache = { hit: true, key: cacheKey, source: "disk", ageSeconds: Math.round((nowMs() - disk.savedAt) / 1000) };
-        meta.quota = getQuotaMeta();
+        meta.cache = {
+          hit: true,
+          key: cacheKey,
+          source: "disk",
+          ageSeconds: Math.round((Date.now() - disk.savedAt) / 1000),
+          lane: cacheLane,
+        };
+        meta.quota = getQuotaState(requestedModel);
         return NextResponse.json({ ok: true, data: disk.data, meta });
       }
     }
 
-    // If quota cooldown is active, skip live attempt and go offline immediately.
-    meta.quota = getQuotaMeta();
-    if (meta.quota.blocked) {
+    if (mode === "offline") {
       const offline = offlineAnalyze(rfpText, capabilityText);
-      RESULT_CACHE.set(cacheKey, { data: offline, savedAt: nowMs() });
-      await writeDiskCache(cacheKey, offline);
+      const withProof = computeProof(offline, capabilityText);
+
+      RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+      await writeDiskCache(cacheKey, withProof);
 
       meta.modelUsed = "offline";
       meta.fallbackUsed = "offline";
-      meta.warnings?.push(`Quota cooldown active; returned offline deterministic analysis (retryAfter=${meta.quota.retryAfterSeconds}s).`);
-      meta.cache = { hit: false, key: cacheKey, source: "none" };
-      meta.quota = getQuotaMeta();
-      return NextResponse.json({ ok: true, data: offline, meta });
+      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+      meta.quota = getQuotaState(requestedModel);
+      return NextResponse.json({ ok: true, data: withProof, meta });
     }
 
-    // Live attempt allowed unless forceMode is explicitly something else
-    const allowLive = forceMode === "live" || forceMode === "" || forceMode === "auto";
+    const q = getQuotaState(requestedModel);
+    meta.quota = q;
+
+    const allowLive = (mode === "live" || mode === "auto") ? !q.blocked : false;
 
     if (!allowLive) {
-      // Unknown mode string; be safe
-      meta.warnings?.push(`Unknown x-matrixmint-mode="${forceMode}". Falling back to offline.`);
+      meta.warnings?.push("Quota circuit breaker active; skipping live call and returning offline analysis.");
+      // note: in this branch we save to MAIN lane cacheKey (because mode is not offline)
       const offline = offlineAnalyze(rfpText, capabilityText);
-      RESULT_CACHE.set(cacheKey, { data: offline, savedAt: nowMs() });
-      await writeDiskCache(cacheKey, offline);
+      const withProof = computeProof(offline, capabilityText);
+
+      RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+      await writeDiskCache(cacheKey, withProof);
+
       meta.modelUsed = "offline";
       meta.fallbackUsed = "offline";
-      meta.quota = getQuotaMeta();
-      return NextResponse.json({ ok: true, data: offline, meta });
+      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+      meta.quota = getQuotaState(requestedModel);
+      return NextResponse.json({ ok: true, data: withProof, meta });
     }
 
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -850,111 +750,87 @@ export async function POST(req: Request) {
 
     const attemptModel = async (m: "gemini-3-flash-preview" | "gemini-3-pro-preview") => {
       try {
-        const parsed = await generateParseValidate({
-          ai,
-          model: m,
-          prompt: basePrompt,
-          jsonSchema,
-          thinkingLevel: THINKING_LEVEL,
-        });
-        return parsed;
+        return await generateParseValidate({ ai, model: m, prompt: basePrompt, jsonSchema, thinkingLevel: THINKING_LEVEL });
       } catch (err: any) {
-        if (isQuotaExceededError(err) || isOverloadedError(err)) throw err;
-
-        const parsed2 = await generateParseValidate({
-          ai,
-          model: m,
-          prompt: strictPrompt,
-          jsonSchema,
-          thinkingLevel: THINKING_LEVEL,
-        });
-        return parsed2;
+        if (!isQuotaExceededError(err) && !isOverloadedError(err)) {
+          return await generateParseValidate({ ai, model: m, prompt: strictPrompt, jsonSchema, thinkingLevel: THINKING_LEVEL });
+        }
+        throw err;
       }
     };
 
-    // Live ladder
+    const primary = requestedModel;
+    const secondary = requestedModel === "gemini-3-pro-preview" ? "gemini-3-flash-preview" : "gemini-3-pro-preview";
+
     try {
-      const parsed = await attemptModel(requestedModel);
+      const parsed = await attemptModel(primary);
       const withProof = computeProof(parsed, capabilityText);
 
-      RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: nowMs() });
+      RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
       await writeDiskCache(cacheKey, withProof);
 
-      meta.modelUsed = requestedModel;
+      meta.modelUsed = primary;
       meta.fallbackUsed = "none";
-      meta.cache = { hit: false, key: cacheKey, source: "none" };
-      meta.quota = getQuotaMeta();
+      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+      meta.quota = getQuotaState(primary);
+
       return NextResponse.json({ ok: true, data: withProof, meta });
     } catch (err: any) {
-      // Pro quota => Flash
-      if (requestedModel === "gemini-3-pro-preview" && isQuotaExceededError(err)) {
-        meta.warnings?.push("Pro quota unavailable; attempting Flash.");
-        try {
-          const parsed = await attemptModel("gemini-3-flash-preview");
-          const withProof = computeProof(parsed, capabilityText);
-
-          RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: nowMs() });
-          await writeDiskCache(cacheKey, withProof);
-
-          meta.modelUsed = "gemini-3-flash-preview";
-          meta.fallbackUsed = "flash";
-          meta.quota = getQuotaMeta();
-          return NextResponse.json({ ok: true, data: withProof, meta });
-        } catch (err2: any) {
-          err = err2;
-          meta.warnings?.push("Flash also blocked; falling back to offline.");
-        }
-      }
-
-      // Any quota => offline
       if (isQuotaExceededError(err)) {
-        const offline = offlineAnalyze(rfpText, capabilityText);
+        const detailsStr = JSON.stringify(err?.error || err || {});
+        const retryMs = parseRetryDelayMs(err);
+        setQuotaBlocked(primary, Date.now() + retryMs, detailsStr);
 
-        RESULT_CACHE.set(cacheKey, { data: offline, savedAt: nowMs() });
-        await writeDiskCache(cacheKey, offline);
+        meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
+        meta.quota = getQuotaState(primary);
+
+        const offline = offlineAnalyze(rfpText, capabilityText);
+        const withProof = computeProof(offline, capabilityText);
+
+        RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+        await writeDiskCache(cacheKey, withProof);
 
         meta.modelUsed = "offline";
         meta.fallbackUsed = "offline";
-        meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
-        meta.quota = getQuotaMeta();
+        meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
 
-        return NextResponse.json({ ok: true, data: offline, meta });
+        return NextResponse.json({ ok: true, data: withProof, meta });
       }
 
-      // Overload => try other model then offline
       if (isOverloadedError(err)) {
-        const fallback =
-          requestedModel === "gemini-3-flash-preview" ? "gemini-3-pro-preview" : "gemini-3-flash-preview";
-        meta.warnings?.push(`${requestedModel} overloaded; attempting ${fallback}.`);
-
+        meta.warnings?.push(`${primary} overloaded; attempting ${secondary}.`);
         try {
-          const parsed = await attemptModel(fallback);
-          const withProof = computeProof(parsed, capabilityText);
+          const parsed2 = await attemptModel(secondary);
+          const withProof2 = computeProof(parsed2, capabilityText);
 
-          RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: nowMs() });
-          await writeDiskCache(cacheKey, withProof);
+          RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
+          await writeDiskCache(cacheKey, withProof2);
 
-          meta.modelUsed = fallback;
-          meta.fallbackUsed = requestedModel === "gemini-3-pro-preview" ? "flash" : "none";
-          meta.quota = getQuotaMeta();
-          return NextResponse.json({ ok: true, data: withProof, meta });
+          meta.modelUsed = secondary;
+          meta.fallbackUsed = secondary === "gemini-3-flash-preview" ? "flash" : "none";
+          meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+          meta.quota = getQuotaState(secondary);
+
+          return NextResponse.json({ ok: true, data: withProof2, meta });
         } catch {
+          meta.warnings?.push("Fallback failed; returned offline deterministic analysis.");
           const offline = offlineAnalyze(rfpText, capabilityText);
+          const withProof = computeProof(offline, capabilityText);
 
-          RESULT_CACHE.set(cacheKey, { data: offline, savedAt: nowMs() });
-          await writeDiskCache(cacheKey, offline);
+          RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+          await writeDiskCache(cacheKey, withProof);
 
           meta.modelUsed = "offline";
           meta.fallbackUsed = "offline";
-          meta.warnings?.push("Fallback failed; returned offline deterministic analysis.");
-          meta.quota = getQuotaMeta();
-          return NextResponse.json({ ok: true, data: offline, meta });
+          meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+          meta.quota = getQuotaState(primary);
+
+          return NextResponse.json({ ok: true, data: withProof, meta });
         }
       }
 
       const msg = String(err?.message ?? "Unknown error");
-      meta.quota = getQuotaMeta();
-      return NextResponse.json({ ok: false, error: msg, meta }, { status: 500 });
+      return NextResponse.json({ ok: false, error: msg }, { status: 500 });
     }
   } catch (err: any) {
     const msg = String(err?.message ?? "Unknown error");

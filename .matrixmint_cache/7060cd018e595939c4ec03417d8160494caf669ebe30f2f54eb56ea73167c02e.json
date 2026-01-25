@@ -1,0 +1,334 @@
+{
+  "savedAt": 1769322416601,
+  "data": {
+    "summary": {
+      "totalRequirements": 18,
+      "coveredCount": 10,
+      "partialCount": 4,
+      "missingCount": 4,
+      "coveragePercent": 55.55555555555556,
+      "topRisks": [
+        "Ambiguity",
+        "Implementation risk",
+        "Scope gap"
+      ],
+      "nextActions": [
+        "Confirm scope priorities and any mandatory go-live constraints (timeline, hosting, integrations).",
+        "Provide a system architecture diagram and data-flow overview for evaluator review.",
+        "Produce a risk mitigation plan for all Partial/Missing requirements with owners and target dates.",
+        "Generate a clarifications email and align on acceptance criteria for each ambiguous requirement."
+      ],
+      "proofNotes": [
+        "Offline deterministic analysis used (conservative coverage scoring).",
+        "Proof verifier checks evidenceQuotes against the Capability Brief text (normalized matching; ellipsis wildcard supported).",
+        "The \"Evidence mismatch\" flag is verifier-owned and is only added/removed by the proof verifier.",
+        "Proof totals count unpaired evidence IDs (IDs without quotes) as unverified references (conservative scoring)."
+      ],
+      "proofPercent": 100,
+      "proofVerifiedCount": 10,
+      "proofTotalEvidenceRefs": 10
+    },
+    "requirements": [
+      {
+        "id": "FR-01",
+        "category": "Functional",
+        "text": "FR-01 The system shall support volunteer registration with configurable form fields.",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-02",
+        "category": "Functional",
+        "text": "FR-02 The system shall allow coordinators to create events and define shifts with capacity limits.",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-03",
+        "category": "Functional",
+        "text": "FR-03 The system shall allow volunteers to sign up for shifts and receive confirmations.",
+        "status": "Partial",
+        "responseSummary": "Partially aligned based on keyword overlap; confirmation and scope details required.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Implementation risk"
+        ]
+      },
+      {
+        "id": "FR-04",
+        "category": "Functional",
+        "text": "FR-04 The system shall send automated reminders 24 hours and 2 hours before a shift via email.",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-05",
+        "category": "Functional",
+        "text": "FR-05 The system shall support optional SMS reminders (if enabled by the organization).",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-06",
+        "category": "Functional",
+        "text": "FR-06 The system shall allow coordinators to mark attendance and record no-shows.",
+        "status": "Partial",
+        "responseSummary": "Partially aligned based on keyword overlap; confirmation and scope details required.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Implementation risk"
+        ]
+      },
+      {
+        "id": "FR-07",
+        "category": "Functional",
+        "text": "FR-07 The system shall maintain a volunteer profile including languages, skills, certifications, and availability.",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-08",
+        "category": "Functional",
+        "text": "FR-08 The system shall support role-based access (Admin, Coordinator, Volunteer).",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-09",
+        "category": "Functional",
+        "text": "FR-09 The system shall provide a bilingual messaging option (English/Spanish) for templates.",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-10",
+        "category": "Functional",
+        "text": "FR-10 The system shall provide a dashboard showing:",
+        "status": "Partial",
+        "responseSummary": "Partially aligned based on keyword overlap; confirmation and scope details required.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Implementation risk"
+        ]
+      },
+      {
+        "id": "FR-11",
+        "category": "Functional",
+        "text": "FR-11 The system shall support CSV export of volunteer rosters, schedules, and attendance logs.",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-12",
+        "category": "Functional",
+        "text": "FR-12 The system shall allow coordinators to broadcast announcements to selected volunteer segments (by skill/language/location).",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-13",
+        "category": "Functional",
+        "text": "FR-13 The system shall provide a basic audit log of coordinator actions (event created, shift edited, message sent).",
+        "status": "Covered",
+        "responseSummary": "Covered with evidence-backed capability in the provided brief.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "CAPABILITY BRIEF Product: ReliefRoster Vendor: MatrixMint Solutions (Sample) CB-01 ReliefRoster provides web-based volunteer registration with configurable form fields and required/optional validation. CB-02 Coordinat"
+        ],
+        "gapsOrQuestions": [],
+        "riskFlags": []
+      },
+      {
+        "id": "FR-14",
+        "category": "Functional",
+        "text": "FR-14 The system shall support data retention settings (e.g., delete inactive volunteer records after X months).",
+        "status": "Partial",
+        "responseSummary": "Partially aligned based on keyword overlap; confirmation and scope details required.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Implementation risk"
+        ]
+      },
+      {
+        "id": "FR-15",
+        "category": "Functional",
+        "text": "FR-15 The system shall provide accessibility considerations for web UI (keyboard navigation and readable contrast).",
+        "status": "Missing",
+        "responseSummary": "Not evidenced in the capability brief; likely requires additional build or third-party support.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Scope gap"
+        ]
+      },
+      {
+        "id": "NFR-01",
+        "category": "NonFunctional",
+        "text": "NFR-01 The platform shall be accessible via modern browsers on desktop and mobile.",
+        "status": "Missing",
+        "responseSummary": "Not evidenced in the capability brief; likely requires additional build or third-party support.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Scope gap"
+        ]
+      },
+      {
+        "id": "NFR-02",
+        "category": "NonFunctional",
+        "text": "NFR-02 The platform shall support at least 2,000 registered volunteers.",
+        "status": "Missing",
+        "responseSummary": "Not evidenced in the capability brief; likely requires additional build or third-party support.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Scope gap"
+        ]
+      },
+      {
+        "id": "NFR-03",
+        "category": "NonFunctional",
+        "text": "NFR-03 The platform shall provide basic error handling and clear user guidance.",
+        "status": "Missing",
+        "responseSummary": "Not evidenced in the capability brief; likely requires additional build or third-party support.",
+        "evidenceIds": [],
+        "evidenceQuotes": [],
+        "gapsOrQuestions": [
+          "Please confirm whether this requirement is mandatory for initial launch or acceptable as a phased enhancement.",
+          "If mandatory, provide preferred implementation constraints (hosting, integrations, data retention)."
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Scope gap"
+        ]
+      }
+    ],
+    "proposalOutline": {
+      "executiveSummary": "MatrixMint delivers a compliance-first workflow that maps RFP requirements to verifiable capability evidence, producing bid-ready artifacts and reducing procurement risk through proof-anchored traceability.",
+      "sections": [
+        "Problem & Procurement Risk",
+        "Solution Overview (MatrixMint Workflow)",
+        "Compliance Matrix (Evidence-Anchored)",
+        "Implementation Plan (30/60/90)",
+        "Security, Privacy, and Reliability",
+        "Risks, Clarifications, and Mitigations",
+        "Support, Training, and Adoption",
+        "Pricing & Licensing (placeholder)",
+        "Appendix: Proof Pack & Evidence Quotes"
+      ]
+    }
+  }
+}

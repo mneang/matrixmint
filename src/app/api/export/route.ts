@@ -36,13 +36,23 @@ type MatrixResult = {
   };
 };
 
+type AnalyzeMetaLike = {
+  modelRequested?: string;
+  modelUsed?: string;
+  fallbackUsed?: string;
+  warnings?: string[];
+  cache?: { hit?: boolean; key?: string; ageSeconds?: number; source?: string };
+  quota?: { blocked?: boolean; blockedUntilUnixMs?: number; lastError?: string };
+};
+
 type ExportFormat =
   | "proofpack_md"
   | "bidpacket_md"
   | "clarifications_email_md"
   | "risks_csv"
   | "proposal_draft_md"
-  | "json";
+  | "json"
+  | "bundle_json";
 
 function safeArray<T>(x: any): T[] {
   return Array.isArray(x) ? (x as T[]) : [];
@@ -76,15 +86,16 @@ function computeStats(result: MatrixResult) {
 
   const coveragePct = total > 0 ? (covered / total) * 100 : safeNumber(result.summary?.coveragePercent, 0);
 
-  const proofPercent =
-    typeof result.summary?.proofPercent === "number" ? result.summary.proofPercent : undefined;
+  const proofPercent = typeof result.summary?.proofPercent === "number" ? result.summary.proofPercent : undefined;
   const proofVerifiedCount =
     typeof result.summary?.proofVerifiedCount === "number" ? result.summary.proofVerifiedCount : undefined;
   const proofTotalEvidenceRefs =
     typeof result.summary?.proofTotalEvidenceRefs === "number" ? result.summary.proofTotalEvidenceRefs : undefined;
 
   const proofLabel =
-    typeof proofPercent === "number" && typeof proofVerifiedCount === "number" && typeof proofTotalEvidenceRefs === "number"
+    typeof proofPercent === "number" &&
+    typeof proofVerifiedCount === "number" &&
+    typeof proofTotalEvidenceRefs === "number"
       ? `${Math.round(proofPercent)}% (${proofVerifiedCount}/${proofTotalEvidenceRefs})`
       : null;
 
@@ -114,7 +125,50 @@ function escapeCsvCell(s: string) {
   return `"${v.replace(/"/g, '""')}"`;
 }
 
-function formatProofPack(result: MatrixResult) {
+function mdEscapeTableCell(s: string) {
+  return String(s ?? "")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, " ")
+    .trim();
+}
+
+function formatRunMeta(meta?: AnalyzeMetaLike) {
+  if (!meta || typeof meta !== "object") return "";
+
+  const warnings = safeArray<string>(meta.warnings).slice(0, 6);
+  const cache = meta.cache || {};
+  const quota = meta.quota || {};
+
+  let out = "";
+  out += mdHeading("Run Metadata");
+  out += `- **modelRequested:** ${safeString(meta.modelRequested, "—")}\n`;
+  out += `- **modelUsed:** ${safeString(meta.modelUsed, "—")}\n`;
+  out += `- **fallbackUsed:** ${safeString(meta.fallbackUsed, "—")}\n`;
+  out += `- **cache:** ${cache?.hit ? "hit" : "miss"}${cache?.source ? ` (${cache.source})` : ""}${
+    typeof cache?.ageSeconds === "number" ? ` age=${cache.ageSeconds}s` : ""
+  }\n`;
+
+  if (typeof quota?.blocked === "boolean") {
+    const until =
+      typeof quota.blockedUntilUnixMs === "number" && quota.blockedUntilUnixMs > 0
+        ? new Date(quota.blockedUntilUnixMs).toISOString()
+        : "—";
+    out += `- **quotaBlocked:** ${quota.blocked ? "true" : "false"}\n`;
+    out += `- **quotaBlockedUntil:** ${until}\n`;
+  }
+
+  if (warnings.length) {
+    out += `- **warnings:**\n`;
+    out += warnings.map((w) => `  - ${w}`).join("\n") + "\n";
+  } else {
+    out += `- **warnings:** —\n`;
+  }
+
+  out += `\n`;
+  return out;
+}
+
+function formatProofPack(result: MatrixResult, meta?: AnalyzeMetaLike) {
   const d = nowISODate();
   const stats = computeStats(result);
   const topRisks = safeArray<string>(result.summary?.topRisks).slice(0, 10);
@@ -143,6 +197,8 @@ function formatProofPack(result: MatrixResult) {
   }
 
   out += `\n`;
+  out += formatRunMeta(meta);
+
   out += mdHeading("Top Risks");
   out += mdList(topRisks);
   out += `\n`;
@@ -159,22 +215,24 @@ function formatProofPack(result: MatrixResult) {
     const gaps = safeArray<string>(r.gapsOrQuestions);
     const risks = safeArray<string>(r.riskFlags);
 
-    out += `| ${safeString(r.id)} | ${safeString(r.category)} | ${safeString(r.status)} | ${safeString(r.text).replace(/\|/g, "\\|")} | ${safeString(r.responseSummary).replace(/\|/g, "\\|")} | ${evidenceIds} | ${gaps.length ? gaps.join("<br/>").replace(/\|/g, "\\|") : "—"} | ${risks.length ? risks.join("<br/>").replace(/\|/g, "\\|") : "—"} |\n`;
+    out += `| ${mdEscapeTableCell(r.id)} | ${mdEscapeTableCell(r.category)} | ${mdEscapeTableCell(r.status)} | ${mdEscapeTableCell(
+      r.text
+    )} | ${mdEscapeTableCell(r.responseSummary)} | ${mdEscapeTableCell(evidenceIds)} | ${
+      gaps.length ? mdEscapeTableCell(gaps.join(" · ")) : "—"
+    } | ${risks.length ? mdEscapeTableCell(risks.join(" · ")) : "—"} |\n`;
   }
 
   out += `\n`;
   return out;
 }
 
-function formatBidPacket(result: MatrixResult) {
+function formatBidPacket(result: MatrixResult, meta?: AnalyzeMetaLike) {
   const d = nowISODate();
   const stats = computeStats(result);
   const reqs = safeArray<RequirementRow>(result.requirements);
 
-  // Non-covered risk areas: status != Covered
   const nonCovered = reqs.filter((r) => r.status !== "Covered");
 
-  // Clarifications: gather gaps/questions
   const clarifications: Array<{ id: string; q: string }> = [];
   for (const r of reqs) {
     for (const q of safeArray<string>(r.gapsOrQuestions)) {
@@ -182,7 +240,6 @@ function formatBidPacket(result: MatrixResult) {
     }
   }
 
-  // Risk register: gather requirements that have risk flags
   const riskRows = reqs
     .filter((r) => safeArray<string>(r.riskFlags).length > 0)
     .map((r) => ({
@@ -192,11 +249,13 @@ function formatBidPacket(result: MatrixResult) {
 
   const execSummary =
     safeString(result.proposalOutline?.executiveSummary) ||
-    "MatrixMint Solutions proposes ReliefRoster, a proof-locked volunteer coordination platform that produces bid-ready compliance artifacts with verifiable evidence quotes, reducing procurement risk and accelerating submission turnaround.";
+    "MatrixMint Solutions proposes a proof-locked compliance workflow that maps each requirement to verifiable capability evidence and exports bid-ready artifacts to reduce procurement risk and accelerate submission turnaround.";
 
   let out = "";
   out += `# MatrixMint — Bid-Ready Packet (MD)\n`;
   out += `_Date: ${d}_\n\n`;
+
+  out += formatRunMeta(meta);
 
   out += `## 1) Executive Snapshot\n`;
   out += `**Coverage:** ${stats.coveragePct.toFixed(0)}% — Covered ${stats.covered} / Partial ${stats.partial} / Missing ${stats.missing} (Total ${stats.total})  \n`;
@@ -230,7 +289,6 @@ function formatBidPacket(result: MatrixResult) {
     out += `- —\n\n`;
   } else {
     for (const rr of riskRows) {
-      // Severity heuristic (deterministic): Evidence mismatch > Third-party dependency > Ambiguity > Weak evidence
       const flags = rr.flags;
       const sev =
         flags.includes("Evidence mismatch")
@@ -253,7 +311,6 @@ function formatBidPacket(result: MatrixResult) {
   if (!actions.length) {
     out += `- —\n\n`;
   } else {
-    // Simple bucketing: first 2 => 0-30, next 2 => 31-60, rest => 61-90
     const a0 = actions.slice(0, 2);
     const a1 = actions.slice(2, 4);
     const a2 = actions.slice(4);
@@ -291,13 +348,11 @@ function formatBidPacket(result: MatrixResult) {
     const quotes = safeArray<string>(r.evidenceQuotes);
     if (!ids.length || !quotes.length) continue;
 
-    // Pair quotes with first evidence id by default; we keep what analyze produced and do not alter quotes.
-    // If multiple quotes, we output up to 2 rows per requirement to keep the packet readable.
     const maxRows = Math.min(2, Math.max(ids.length, quotes.length));
     for (let i = 0; i < maxRows; i++) {
       const eid = ids[i] ?? ids[0];
       const q = quotes[i] ?? quotes[0];
-      out += `| ${r.id} | ${eid} | ${q.replace(/\|/g, "\\|")} |\n`;
+      out += `| ${mdEscapeTableCell(r.id)} | ${mdEscapeTableCell(eid)} | ${mdEscapeTableCell(q)} |\n`;
     }
   }
 
@@ -305,7 +360,7 @@ function formatBidPacket(result: MatrixResult) {
   return out;
 }
 
-function formatClarificationsEmail(result: MatrixResult) {
+function formatClarificationsEmail(result: MatrixResult, meta?: AnalyzeMetaLike) {
   const d = nowISODate();
   const reqs = safeArray<RequirementRow>(result.requirements);
 
@@ -319,8 +374,10 @@ function formatClarificationsEmail(result: MatrixResult) {
   let out = "";
   out += `# Clarifications Email (MD)\n`;
   out += `_Date: ${d}_\n\n`;
-  out += `Subject: Clarifications for RapidRelief RFP — Requirements & Integration Details\n\n`;
-  out += `Hello RapidRelief Team,\n\n`;
+  out += formatRunMeta(meta);
+
+  out += `Subject: Clarifications for RFP — Requirements & Integration Details\n\n`;
+  out += `Hello Team,\n\n`;
   out += `Thank you for the opportunity to respond. To ensure our proposal is fully aligned and implementation-ready, we would appreciate clarification on the items below:\n\n`;
 
   if (!items.length) {
@@ -348,7 +405,6 @@ function formatRisksCsv(result: MatrixResult) {
     const gaps = safeArray<string>(r.gapsOrQuestions).join("; ");
     const eids = safeArray<string>(r.evidenceIds).join("; ");
 
-    // Include rows with any risk or any gap (so it’s useful even if riskFlags are empty)
     if (!riskFlags && !gaps) continue;
 
     lines.push(
@@ -365,7 +421,7 @@ function formatRisksCsv(result: MatrixResult) {
   return lines.join("\n") + "\n";
 }
 
-function formatProposalDraft(result: MatrixResult) {
+function formatProposalDraft(result: MatrixResult, meta?: AnalyzeMetaLike) {
   const d = nowISODate();
 
   const exec = safeString(result.proposalOutline?.executiveSummary) || "—";
@@ -374,6 +430,8 @@ function formatProposalDraft(result: MatrixResult) {
   let out = "";
   out += `# MatrixMint — Proposal Draft (MD)\n`;
   out += `_Date: ${d}_\n\n`;
+
+  out += formatRunMeta(meta);
 
   out += `## Executive Summary\n`;
   out += `${exec}\n\n`;
@@ -399,6 +457,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => null);
     const result = (body?.result ?? null) as MatrixResult | null;
+    const meta = (body?.meta ?? null) as AnalyzeMetaLike | null;
 
     if (!result || typeof result !== "object") {
       return NextResponse.json({ error: "Missing result payload" }, { status: 400 });
@@ -407,6 +466,17 @@ export async function POST(req: NextRequest) {
     // Minimal shape checks (soft)
     result.requirements = safeArray<RequirementRow>((result as any).requirements);
     result.summary = (result as any).summary ?? {};
+
+    if (format === "bundle_json") {
+      const json = JSON.stringify({ result, meta }, null, 2);
+      return new NextResponse(json, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Disposition": `attachment; filename="matrixmint-bundle-${nowISODate()}.json"`,
+        },
+      });
+    }
 
     if (format === "json") {
       const json = JSON.stringify(result, null, 2);
@@ -434,16 +504,16 @@ export async function POST(req: NextRequest) {
     let filename = "matrixmint-export.md";
 
     if (format === "proofpack_md") {
-      content = formatProofPack(result);
+      content = formatProofPack(result, meta ?? undefined);
       filename = `matrixmint-proofpack-${nowISODate()}.md`;
     } else if (format === "bidpacket_md") {
-      content = formatBidPacket(result);
+      content = formatBidPacket(result, meta ?? undefined);
       filename = `matrixmint-bid-ready-${nowISODate()}.md`;
     } else if (format === "clarifications_email_md") {
-      content = formatClarificationsEmail(result);
+      content = formatClarificationsEmail(result, meta ?? undefined);
       filename = `matrixmint-clarifications-email-${nowISODate()}.md`;
     } else if (format === "proposal_draft_md") {
-      content = formatProposalDraft(result);
+      content = formatProposalDraft(result, meta ?? undefined);
       filename = `matrixmint-proposal-draft-${nowISODate()}.md`;
     } else {
       return NextResponse.json({ error: `Unknown export format: ${format}` }, { status: 400 });
