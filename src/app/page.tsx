@@ -390,11 +390,10 @@ export default function Home() {
         Used: <b style={{ marginLeft: 6 }}>{meta.modelUsed ?? "—"}</b>
       </span>
       <span style={smallPillStyle()}>
-        Cache:{" "}
-        <b style={{ marginLeft: 6 }}>
-          {meta.cache?.hit ? `hit (${meta.cache.source ?? "?"})` : "miss"}
-        </b>
-        {typeof meta.cache?.ageSeconds === "number" ? <span style={{ marginLeft: 6, opacity: 0.8 }}>age={meta.cache.ageSeconds}s</span> : null}
+        Cache: <b style={{ marginLeft: 6 }}>{meta.cache?.hit ? `hit (${meta.cache.source ?? "?"})` : "miss"}</b>
+        {typeof meta.cache?.ageSeconds === "number" ? (
+          <span style={{ marginLeft: 6, opacity: 0.8 }}>age={meta.cache.ageSeconds}s</span>
+        ) : null}
       </span>
       {quotaInfo.blocked ? (
         <span style={{ ...smallPillStyle(), borderColor: "rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.06)" }}>
@@ -420,6 +419,24 @@ export default function Home() {
           </div>
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            {/* Tiny, safe win: obvious judge path */}
+            <a
+              href="/demo"
+              style={{
+                padding: "10px 14px",
+                borderRadius: 12,
+                border: "1px solid rgba(0,0,0,0.14)",
+                background: "white",
+                color: "black",
+                fontWeight: 900,
+                cursor: "pointer",
+                textDecoration: "none",
+              }}
+              title="Judge-focused demo: FAST → exports → LIVE proof"
+            >
+              Judge Demo →
+            </a>
+
             <select value={forceMode} onChange={(e) => setForceMode(e.target.value as ForceMode)} style={selectStyle} title="Execution mode">
               <option value="auto">Mode: Auto</option>
               <option value="live">Mode: Live</option>
@@ -427,12 +444,7 @@ export default function Home() {
               <option value="offline">Mode: Offline</option>
             </select>
 
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value as any)}
-              style={selectStyle}
-              title="Model"
-            >
+            <select value={model} onChange={(e) => setModel(e.target.value as any)} style={selectStyle} title="Model">
               <option value="gemini-3-flash-preview">Gemini 3 Flash (fast)</option>
               <option value="gemini-3-pro-preview">Gemini 3 Pro (best)</option>
             </select>
@@ -739,9 +751,15 @@ export default function Home() {
           <section style={{ marginTop: 16, ...card }}>
             <div style={{ fontSize: 16, fontWeight: 900 }}>How to use</div>
             <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.7 }}>
-              <li>Click <b>Load Sample</b> (or paste your own RFP + Capability Brief).</li>
-              <li>Click <b>Run Analysis</b> to generate the compliance matrix with evidence.</li>
-              <li>Use <b>Download</b> to export a Proof Pack, Bid-Ready Packet, or Clarifications Email.</li>
+              <li>
+                Click <b>Load Sample</b> (or paste your own RFP + Capability Brief).
+              </li>
+              <li>
+                Click <b>Run Analysis</b> to generate the compliance matrix with evidence.
+              </li>
+              <li>
+                Use <b>Download</b> to export a Proof Pack, Bid-Ready Packet, or Clarifications Email.
+              </li>
             </ol>
             <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
               This is not a chatbot wrapper. It is a proof-locked compliance and export system.

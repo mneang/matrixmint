@@ -1,3 +1,4 @@
+// src/app/api/analyze/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
@@ -9,11 +10,12 @@ import { promises as fs } from "fs";
 import { matrixResultSchema } from "@/lib/matrixSchema";
 
 // --------- Thinking level compat ----------
-let THINKING_LEVEL: any = "HIGH";
+let THINKING_LEVEL: any = "MEDIUM";
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+   
   const mod = require("@google/genai");
-  if (mod?.ThinkingLevel?.HIGH) THINKING_LEVEL = mod.ThinkingLevel.HIGH;
+  if (mod?.ThinkingLevel?.MEDIUM) THINKING_LEVEL = mod.ThinkingLevel.MEDIUM;
+  else if (mod?.ThinkingLevel?.HIGH) THINKING_LEVEL = mod.ThinkingLevel.HIGH;
 } catch {
   // ignore
 }
@@ -88,7 +90,7 @@ type AnalyzeMeta = {
 const RESULT_CACHE = new Map<string, { data: MatrixResult; savedAt: number }>();
 const CACHE_DIR = path.join(process.cwd(), ".matrixmint_cache");
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
-const CACHE_VERSION = "v4"; // bumped due to cache lane change
+const CACHE_VERSION = "v4";
 
 async function ensureCacheDir() {
   await fs.mkdir(CACHE_DIR, { recursive: true });
@@ -133,6 +135,27 @@ async function writeDiskCache(key: string, data: MatrixResult) {
   await fs.rename(tmp, p);
 }
 
+async function diskCacheExists(key: string) {
+  try {
+    await ensureCacheDir();
+    await fs.access(cachePathForKey(key));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cache quality guard:
+ * If we already have a cached result (memory or disk),
+ * do not overwrite it with an offline fallback (conservative, often lower-coverage).
+ */
+async function shouldWriteOfflineFallback(key: string) {
+  if (RESULT_CACHE.has(key)) return false;
+  if (await diskCacheExists(key)) return false;
+  return true;
+}
+
 // --------- Quota circuit breaker ----------
 const QUOTA_STATE: Record<string, QuotaMeta> = {
   global: { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
@@ -160,9 +183,7 @@ function setQuotaBlocked(model: string, blockedUntilUnixMs: number, lastError: s
 }
 
 function parseRetryDelayMs(details: any): number {
-  const retryDelay = details?.error?.details?.find?.((d: any) =>
-    String(d?.["@type"] || "").includes("RetryInfo")
-  )?.retryDelay;
+  const retryDelay = details?.error?.details?.find?.((d: any) => String(d?.["@type"] || "").includes("RetryInfo"))?.retryDelay;
 
   if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
     const secs = Number(retryDelay.replace("s", ""));
@@ -318,6 +339,18 @@ function isQuotaExceededError(err: any) {
   );
 }
 
+function isAbortError(err: any) {
+  const name = String(err?.name || "");
+  const msg = String(err?.message || "");
+  return name === "AbortError" || msg.toLowerCase().includes("aborted");
+}
+
+function makeAbortSignal(timeoutMs: number) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  return { signal: ctrl.signal, clear: () => clearTimeout(t) };
+}
+
 async function extractResponseText(resp: any): Promise<string> {
   if (!resp) return "";
   if (typeof resp.text === "string") return resp.text;
@@ -351,17 +384,43 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Timeout policy:
+ * - LIVE: generous headroom to avoid judge-timeout-triggered aborts.
+ * - AUTO: slightly tighter but still stable.
+ * - Env overrides supported.
+ */
+function resolveModelTimeoutMs(params: {
+  mode: "auto" | "live" | "cache" | "offline";
+  model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
+}) {
+  const { mode, model } = params;
+
+  const flashLive = Number(process.env.MM_FLASH_TIMEOUT_LIVE_MS || 132_000);
+  const flashAuto = Number(process.env.MM_FLASH_TIMEOUT_AUTO_MS || 105_000);
+  const proLive = Number(process.env.MM_PRO_TIMEOUT_LIVE_MS || 150_000);
+  const proAuto = Number(process.env.MM_PRO_TIMEOUT_AUTO_MS || 120_000);
+
+  if (model === "gemini-3-pro-preview") {
+    return mode === "live" ? proLive : proAuto;
+  }
+  return mode === "live" ? flashLive : flashAuto;
+}
+
 async function generateWithRetries(params: {
   ai: GoogleGenAI;
   model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
   prompt: string;
   jsonSchema: any;
   thinkingLevel: any;
+  timeoutMs: number;
 }) {
-  const { ai, model, prompt, jsonSchema, thinkingLevel } = params;
+  const { ai, model, prompt, jsonSchema, thinkingLevel, timeoutMs } = params;
 
   const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { signal, clear } = makeAbortSignal(timeoutMs);
+
     try {
       return await ai.models.generateContent({
         model,
@@ -373,15 +432,19 @@ async function generateWithRetries(params: {
           temperature: 0.2,
           topP: 0.9,
           candidateCount: 1,
+          abortSignal: signal,
         } as any,
       });
     } catch (err: any) {
+      if (isAbortError(err)) throw err;
       if (isQuotaExceededError(err)) throw err;
       if (!isOverloadedError(err) || attempt === maxAttempts) throw err;
 
       const wait = 250 + attempt * attempt * 150;
       console.log(`MatrixMint: ${model} overloaded. Retry ${attempt}/${maxAttempts} in ${wait}ms`);
       await sleep(wait);
+    } finally {
+      clear();
     }
   }
   throw new Error("Retry loop fell through unexpectedly");
@@ -454,6 +517,7 @@ async function generateParseValidate(params: {
   prompt: string;
   jsonSchema: any;
   thinkingLevel: any;
+  timeoutMs: number;
 }) {
   const resp = await generateWithRetries(params);
   const raw = (await extractResponseText(resp)) ?? "";
@@ -629,9 +693,7 @@ export async function POST(req: Request) {
     const body = (await req.json()) as Partial<AnalyzeBody>;
     const rfpText = normalizeText(body.rfpText ?? "");
     const capabilityText = normalizeText(body.capabilityText ?? "");
-    const requestedModel = (body.model ?? "gemini-3-flash-preview") as
-      | "gemini-3-flash-preview"
-      | "gemini-3-pro-preview";
+    const requestedModel = (body.model ?? "gemini-3-flash-preview") as "gemini-3-flash-preview" | "gemini-3-pro-preview";
 
     meta.modelRequested = requestedModel;
 
@@ -658,15 +720,10 @@ export async function POST(req: Request) {
     if (mode === "live") meta.warnings?.push("Live-preferred mode (x-matrixmint-mode=live).");
     if (bustCache) meta.warnings?.push("Cache bust enabled; bypassing memory+disk cache.");
 
-    // ✅ Cache lane isolation:
-    // - offline lane only for forced offline requests or offline fallback saves
-    // - main lane for normal operation
     const cacheLane: "main" | "offline" = mode === "offline" ? "offline" : "main";
     meta.cache = { hit: false, source: "none", lane: cacheLane };
 
-    const cacheKey = sha256(
-      `${CACHE_VERSION}\nlane=${cacheLane}\n${requestedModel}\n${rfpText}\n---\n${capabilityText}`
-    );
+    const cacheKey = sha256(`${CACHE_VERSION}\nlane=${cacheLane}\n${requestedModel}\n${rfpText}\n---\n${capabilityText}`);
     meta.cache.key = cacheKey;
 
     if (clearCache) {
@@ -723,37 +780,62 @@ export async function POST(req: Request) {
     }
 
     const q = getQuotaState(requestedModel);
-    meta.quota = q;
+meta.quota = q;
 
-    const allowLive = (mode === "live" || mode === "auto") ? !q.blocked : false;
+// Live mode should always attempt the live call.
+// Auto mode respects the circuit breaker to reduce wasted calls during cooldown.
+const allowLive = mode === "live" ? true : mode === "auto" ? !q.blocked : false;
 
-    if (!allowLive) {
-      meta.warnings?.push("Quota circuit breaker active; skipping live call and returning offline analysis.");
-      // note: in this branch we save to MAIN lane cacheKey (because mode is not offline)
-      const offline = offlineAnalyze(rfpText, capabilityText);
-      const withProof = computeProof(offline, capabilityText);
+if (mode === "live" && q.blocked) {
+  meta.warnings?.push("Quota circuit breaker active; live mode will still attempt the API call.");
+}
 
-      RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
-      await writeDiskCache(cacheKey, withProof);
+if (!allowLive) {
+  meta.warnings?.push("Quota circuit breaker active; returning offline analysis.");
 
-      meta.modelUsed = "offline";
-      meta.fallbackUsed = "offline";
-      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
-      meta.quota = getQuotaState(requestedModel);
-      return NextResponse.json({ ok: true, data: withProof, meta });
-    }
+  const offline = offlineAnalyze(rfpText, capabilityText);
+  const withProof = computeProof(offline, capabilityText);
+
+  if (await shouldWriteOfflineFallback(cacheKey)) {
+    RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+    await writeDiskCache(cacheKey, withProof);
+  }
+
+  meta.modelUsed = "offline";
+  meta.fallbackUsed = "offline";
+  meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+  meta.quota = getQuotaState(requestedModel);
+  return NextResponse.json({ ok: true, data: withProof, meta });
+}
 
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const jsonSchema = z.toJSONSchema(matrixResultSchema);
     const basePrompt = buildPrompt(rfpText, capabilityText);
     const strictPrompt = buildStrictRetryPrompt(basePrompt);
 
+    const modelTimeoutMs = resolveModelTimeoutMs({ mode, model: requestedModel });
+
     const attemptModel = async (m: "gemini-3-flash-preview" | "gemini-3-pro-preview") => {
       try {
-        return await generateParseValidate({ ai, model: m, prompt: basePrompt, jsonSchema, thinkingLevel: THINKING_LEVEL });
+        return await generateParseValidate({
+          ai,
+          model: m,
+          prompt: basePrompt,
+          jsonSchema,
+          thinkingLevel: THINKING_LEVEL,
+          timeoutMs: modelTimeoutMs,
+        });
       } catch (err: any) {
+        if (isAbortError(err)) throw err;
         if (!isQuotaExceededError(err) && !isOverloadedError(err)) {
-          return await generateParseValidate({ ai, model: m, prompt: strictPrompt, jsonSchema, thinkingLevel: THINKING_LEVEL });
+          return await generateParseValidate({
+            ai,
+            model: m,
+            prompt: strictPrompt,
+            jsonSchema,
+            thinkingLevel: THINKING_LEVEL,
+            timeoutMs: modelTimeoutMs,
+          });
         }
         throw err;
       }
@@ -776,19 +858,17 @@ export async function POST(req: Request) {
 
       return NextResponse.json({ ok: true, data: withProof, meta });
     } catch (err: any) {
-      if (isQuotaExceededError(err)) {
-        const detailsStr = JSON.stringify(err?.error || err || {});
-        const retryMs = parseRetryDelayMs(err);
-        setQuotaBlocked(primary, Date.now() + retryMs, detailsStr);
-
-        meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
+      if (isAbortError(err)) {
+        meta.warnings?.push("Live request timed out; returned offline deterministic analysis (conservative).");
         meta.quota = getQuotaState(primary);
 
         const offline = offlineAnalyze(rfpText, capabilityText);
         const withProof = computeProof(offline, capabilityText);
 
-        RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
-        await writeDiskCache(cacheKey, withProof);
+        if (await shouldWriteOfflineFallback(cacheKey)) {
+          RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+          await writeDiskCache(cacheKey, withProof);
+        }
 
         meta.modelUsed = "offline";
         meta.fallbackUsed = "offline";
@@ -796,6 +876,74 @@ export async function POST(req: Request) {
 
         return NextResponse.json({ ok: true, data: withProof, meta });
       }
+
+      if (isQuotaExceededError(err)) {
+  const detailsStr = (() => {
+    try {
+      return JSON.stringify(err?.error || err || {});
+    } catch {
+      return String(err);
+    }
+  })();
+
+  const retryMs = parseRetryDelayMs(err);
+  setQuotaBlocked(primary, Date.now() + retryMs, detailsStr);
+
+  // If primary is rate-limited, try the secondary model before falling back to offline.
+  if ((mode === "live" || mode === "auto") && secondary && secondary !== primary) {
+    const q2 = getQuotaState(secondary);
+    if (!q2.blocked) {
+      meta.warnings?.push(`Quota exceeded for ${primary}; attempting ${secondary}.`);
+      try {
+        const parsed2 = await attemptModel(secondary);
+        const withProof2 = computeProof(parsed2, capabilityText);
+
+        RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
+        await writeDiskCache(cacheKey, withProof2);
+
+        meta.modelUsed = secondary;
+        meta.fallbackUsed = secondary === "gemini-3-flash-preview" ? "flash" : "none";
+        meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+        meta.quota = getQuotaState(secondary);
+
+        return NextResponse.json({ ok: true, data: withProof2, meta });
+      } catch (err2: any) {
+        // If the secondary is also quota-limited, block it briefly too.
+        if (isQuotaExceededError(err2)) {
+          const detailsStr2 = (() => {
+            try {
+              return JSON.stringify(err2?.error || err2 || {});
+            } catch {
+              return String(err2);
+            }
+          })();
+          const retryMs2 = parseRetryDelayMs(err2);
+          setQuotaBlocked(secondary, Date.now() + retryMs2, detailsStr2);
+        }
+        meta.warnings?.push("Fallback failed; returned offline deterministic analysis.");
+      }
+    } else {
+      meta.warnings?.push(`Quota exceeded for ${primary}; secondary ${secondary} is also blocked.`);
+    }
+  }
+
+  meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
+  meta.quota = getQuotaState(primary);
+
+  const offline = offlineAnalyze(rfpText, capabilityText);
+  const withProof = computeProof(offline, capabilityText);
+
+  if (await shouldWriteOfflineFallback(cacheKey)) {
+    RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+    await writeDiskCache(cacheKey, withProof);
+  }
+
+  meta.modelUsed = "offline";
+  meta.fallbackUsed = "offline";
+  meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+
+  return NextResponse.json({ ok: true, data: withProof, meta });
+}
 
       if (isOverloadedError(err)) {
         meta.warnings?.push(`${primary} overloaded; attempting ${secondary}.`);
@@ -814,11 +962,14 @@ export async function POST(req: Request) {
           return NextResponse.json({ ok: true, data: withProof2, meta });
         } catch {
           meta.warnings?.push("Fallback failed; returned offline deterministic analysis.");
+
           const offline = offlineAnalyze(rfpText, capabilityText);
           const withProof = computeProof(offline, capabilityText);
 
-          RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
-          await writeDiskCache(cacheKey, withProof);
+          if (await shouldWriteOfflineFallback(cacheKey)) {
+            RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+            await writeDiskCache(cacheKey, withProof);
+          }
 
           meta.modelUsed = "offline";
           meta.fallbackUsed = "offline";

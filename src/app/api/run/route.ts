@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 /**
  * /api/run
  * Orchestrates:
- *  1) /api/analyze (pref lane, with timeout + fallback)
+ *  1) /api/analyze (preferred lane, with timeout + fallback)
  *  2) /api/export?format=bundle_json
  *
  * Adds:
@@ -11,9 +11,9 @@ import { NextRequest, NextResponse } from "next/server";
  *  - runSummary proof fields (non-breaking)
  *  - stores the bundle in an in-memory run store (for /api/runs replay)
  *
- * Sprint 4 focus:
- *  - Make LIVE reliable: avoid premature 45s aborts
- *  - Emit attempt logs for judges: what we tried, what failed, what succeeded
+ * Focus:
+ *  - Make LIVE reliable: avoid premature aborts
+ *  - Emit attempt logs for judge transparency
  */
 
 type RunBody = {
@@ -47,7 +47,6 @@ async function fetchJson(url: string, init?: RequestInit) {
   return { res, text, json };
 }
 
-// ---- Timeout wrapper (fixes 45s abort issues) ----
 async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -56,8 +55,8 @@ async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs: n
     const merged: RequestInit = { ...init, signal: ctrl.signal };
     const out = await fetchJson(url, merged);
     return { ...out, aborted: false as const, timeoutMs };
-  } catch (e: any) {
-    const msg = String(e?.message ?? e);
+  } catch (e: unknown) {
+    const msg = String((e as any)?.message ?? e);
     const aborted = msg.toLowerCase().includes("aborted");
     return {
       res: null as any,
@@ -71,29 +70,11 @@ async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs: n
   }
 }
 
-function pickForwardHeaders(req: NextRequest) {
-  const out: Record<string, string> = { "Content-Type": "application/json" };
-
-  const mode = req.headers.get("x-matrixmint-mode"); // live | cache | offline
-  const bust = req.headers.get("x-matrixmint-bust-cache");
-  const clear = req.headers.get("x-matrixmint-clear-cache");
-
-  if (mode) out["x-matrixmint-mode"] = mode;
-  if (bust) out["x-matrixmint-bust-cache"] = bust;
-  if (clear) out["x-matrixmint-clear-cache"] = clear;
-
-  return out;
-}
-
 function modeFromReq(req: NextRequest): "live" | "cache" | "offline" {
   const m = (req.headers.get("x-matrixmint-mode") || "").toLowerCase();
   if (m === "cache") return "cache";
   if (m === "offline") return "offline";
   return "live";
-}
-
-function isRetriableStatus(status: number) {
-  return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
 // ---- Run store (in-memory) ----
@@ -180,9 +161,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ---- Step 1: Analyze with lane logic ----
-    // Increase live timeout to avoid premature abort.
-    // You saw ~45s abort; we give it 120s for live.
-    const LIVE_TIMEOUT_MS = 120_000;
+    // LIVE must have enough headroom to avoid aborting just before the judge timeout.
+    const LIVE_TIMEOUT_MS = 138_000;
     const CACHE_TIMEOUT_MS = 8_000;
     const OFFLINE_TIMEOUT_MS = 8_000;
 
@@ -192,7 +172,8 @@ export async function POST(req: NextRequest) {
       const h: Record<string, string> = { "Content-Type": "application/json" };
       h["x-matrixmint-mode"] = mode;
       if (bust) h["x-matrixmint-bust-cache"] = "1";
-      // forward clear-cache if present
+
+      // Forward clear-cache if present
       const clear = req.headers.get("x-matrixmint-clear-cache");
       if (clear) h["x-matrixmint-clear-cache"] = clear;
 
@@ -231,19 +212,13 @@ export async function POST(req: NextRequest) {
     } else if (reqMode === "cache") {
       analyzeRes = await tryAnalyze("cache_forced", "cache", false, CACHE_TIMEOUT_MS);
     } else {
-      // live preferred, cache fallback only on timeout/retriable/non-ok
+      // Live preferred; cache fallback only if live fails/times out.
       const preferred = await tryAnalyze("preferred", "live", true, LIVE_TIMEOUT_MS);
-
       const preferredOk = Boolean(preferred.res?.ok && preferred.json?.ok);
-      const preferredStatus = preferred.res?.status ?? null;
-      const preferredTimedOut = Boolean(preferred.aborted);
-      const preferredRetriable = typeof preferredStatus === "number" && isRetriableStatus(preferredStatus);
 
       if (preferredOk) {
         analyzeRes = preferred;
       } else {
-        // fallback to cache to preserve judgeability
-        // (but attempt log will clearly show why)
         const fallback = await tryAnalyze("cache_fallback", "cache", false, CACHE_TIMEOUT_MS);
         analyzeRes = fallback;
       }
@@ -285,7 +260,8 @@ export async function POST(req: NextRequest) {
 
     // Determine ladderUsed + modelUsed
     const lastOkAttempt = attempts.slice().reverse().find((a) => a.ok);
-    const ladderUsed = lastOkAttempt?.name?.includes("cache") ? "cache" : lastOkAttempt?.name?.includes("offline") ? "offline" : "live";
+    const ladderUsed =
+      lastOkAttempt?.name?.includes("cache") ? "cache" : lastOkAttempt?.name?.includes("offline") ? "offline" : "live";
 
     // ---- Step 2: Bundle export ----
     const bundle = await fetchJson(`${origin}/api/export?format=bundle_json`, {
@@ -323,7 +299,7 @@ export async function POST(req: NextRequest) {
       modelUsed: meta?.modelUsed ?? undefined,
       cache: meta?.cache ?? undefined,
       warnings: meta?.warnings ?? [],
-      attempts, // judge-grade transparency
+      attempts,
     };
 
     // Make proof fields explicit (non-breaking)
@@ -360,11 +336,11 @@ export async function POST(req: NextRequest) {
     }
 
     return new NextResponse(json, { status: 200, headers: headersOut });
-  } catch (err: any) {
+  } catch (err: unknown) {
     return NextResponse.json(
       {
         ok: false,
-        error: String(err?.message ?? "Run failed"),
+        error: String((err as any)?.message ?? "Run failed"),
         runId,
         attempts,
       },
