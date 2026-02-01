@@ -163,6 +163,40 @@ const QUOTA_STATE: Record<string, QuotaMeta> = {
   "gemini-3-pro-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
 };
 
+
+
+
+// --------- Live gate (serializes live Gemini calls) ----------
+let LIVE_CHAIN: Promise<void> = Promise.resolve();
+let LAST_LIVE_AT = 0;
+
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
+/**
+ * Serializes calls and enforces a minimum gap between live Gemini requests.
+ * This prevents burst quota hits during judgeRun's back-to-back requests.
+ */
+async function withLiveGate<T>(minGapMs: number, fn: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const prev = LIVE_CHAIN;
+  LIVE_CHAIN = new Promise<void>((r) => (release = r));
+
+  await prev;
+
+  const waitMs = LAST_LIVE_AT + minGapMs - Date.now();
+  if (waitMs > 0) await sleep(waitMs);
+
+  try {
+    return await fn();
+  } finally {
+    LAST_LIVE_AT = Date.now();
+    release();
+  }
+}
+// --------- End live gate ----------
+
 function getQuotaState(model: string): QuotaMeta {
   const m = QUOTA_STATE[model] || QUOTA_STATE.global;
   const now = Date.now();
@@ -378,10 +412,6 @@ async function extractResponseText(resp: any): Promise<string> {
   }
 
   return "";
-}
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
@@ -791,7 +821,23 @@ if (mode === "live" && q.blocked) {
 }
 
 if (!allowLive) {
-  meta.warnings?.push("Quota circuit breaker active; returning offline analysis.");
+  // In STRICT live mode, do NOT return a 200 offline fallback (judge will fail).
+  // Instead, return 429 so the client/judge can retry after cooldown.
+  if (mode === "live") {
+    const now = Date.now();
+    const retryMs = Math.max(10_000, (q.blockedUntilUnixMs || (now + 20_000)) - now);
+
+    meta.warnings?.push("Quota circuit breaker active; refusing offline fallback in live mode.");
+    meta.quota = getQuotaState(requestedModel);
+
+    return NextResponse.json(
+      { ok: false, error: "quota_blocked", retryAfterMs: retryMs, meta },
+      { status: 429, headers: { "Retry-After": String(Math.ceil(retryMs / 1000)) } }
+    );
+  }
+
+  // For non-live (auto/cache/etc), we can still fall back offline.
+  meta.warnings?.push("Quota circuit breaker active; skipping live call and returning offline analysis.");
 
   const offline = offlineAnalyze(rfpText, capabilityText);
   const withProof = computeProof(offline, capabilityText);
@@ -816,15 +862,19 @@ if (!allowLive) {
     const modelTimeoutMs = resolveModelTimeoutMs({ mode, model: requestedModel });
 
     const attemptModel = async (m: "gemini-3-flash-preview" | "gemini-3-pro-preview") => {
-      try {
-        return await generateParseValidate({
-          ai,
-          model: m,
-          prompt: basePrompt,
-          jsonSchema,
-          thinkingLevel: THINKING_LEVEL,
-          timeoutMs: modelTimeoutMs,
-        });
+      
+      // Retry quota-exceeded once (live mode only) after suggested delay.
+try {
+        return await withLiveGate(1200, async () => {
+  return await generateParseValidate({
+    ai,
+    model: m,
+    prompt: basePrompt,
+    jsonSchema,
+    thinkingLevel: THINKING_LEVEL,
+    timeoutMs: modelTimeoutMs,
+  });
+});
       } catch (err: any) {
         if (isAbortError(err)) throw err;
         if (!isQuotaExceededError(err) && !isOverloadedError(err)) {
@@ -844,8 +894,25 @@ if (!allowLive) {
     const primary = requestedModel;
     const secondary = requestedModel === "gemini-3-pro-preview" ? "gemini-3-flash-preview" : "gemini-3-pro-preview";
 
-    try {
-      const parsed = await attemptModel(primary);
+    
+const attemptModelWithQuotaRetry = async (
+  m: "gemini-3-flash-preview" | "gemini-3-pro-preview"
+) => {
+  try {
+    return await attemptModel(m);
+  } catch (err: any) {
+    if (mode === "live" && isQuotaExceededError(err)) {
+      const retryMs = parseRetryDelayMs(err);
+      meta.warnings?.push(`Quota exceeded for ${m}; waiting ${Math.ceil(retryMs / 1000)}s then retrying.`);
+      await sleep(retryMs);
+      return await attemptModel(m);
+    }
+    throw err;
+  }
+};
+
+try {
+      const parsed = await attemptModelWithQuotaRetry(primary);
       const withProof = computeProof(parsed, capabilityText);
 
       RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
@@ -878,55 +945,40 @@ if (!allowLive) {
       }
 
       if (isQuotaExceededError(err)) {
-  const detailsStr = (() => {
-    try {
-      return JSON.stringify(err?.error || err || {});
-    } catch {
-      return String(err);
-    }
-  })();
-
+  const detailsStr = JSON.stringify((err as any)?.error || err || {});
   const retryMs = parseRetryDelayMs(err);
   setQuotaBlocked(primary, Date.now() + retryMs, detailsStr);
 
-  // If primary is rate-limited, try the secondary model before falling back to offline.
-  if ((mode === "live" || mode === "auto") && secondary && secondary !== primary) {
-    const q2 = getQuotaState(secondary);
-    if (!q2.blocked) {
-      meta.warnings?.push(`Quota exceeded for ${primary}; attempting ${secondary}.`);
-      try {
-        const parsed2 = await attemptModel(secondary);
-        const withProof2 = computeProof(parsed2, capabilityText);
+  meta.quota = getQuotaState(primary);
 
-        RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
-        await writeDiskCache(cacheKey, withProof2);
+  // In live mode: do not succeed with offline output. Try secondary once, else 429 so judge can retry.
+  if (mode === "live") {
+    meta.warnings?.push(`Quota exceeded for ${primary}; attempting ${secondary}.`);
 
-        meta.modelUsed = secondary;
-        meta.fallbackUsed = secondary === "gemini-3-flash-preview" ? "flash" : "none";
-        meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
-        meta.quota = getQuotaState(secondary);
+    try {
+      const parsed2 = await attemptModelWithQuotaRetry(secondary);
+      const withProof2 = computeProof(parsed2, capabilityText);
 
-        return NextResponse.json({ ok: true, data: withProof2, meta });
-      } catch (err2: any) {
-        // If the secondary is also quota-limited, block it briefly too.
-        if (isQuotaExceededError(err2)) {
-          const detailsStr2 = (() => {
-            try {
-              return JSON.stringify(err2?.error || err2 || {});
-            } catch {
-              return String(err2);
-            }
-          })();
-          const retryMs2 = parseRetryDelayMs(err2);
-          setQuotaBlocked(secondary, Date.now() + retryMs2, detailsStr2);
-        }
-        meta.warnings?.push("Fallback failed; returned offline deterministic analysis.");
-      }
-    } else {
-      meta.warnings?.push(`Quota exceeded for ${primary}; secondary ${secondary} is also blocked.`);
+      RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
+      await writeDiskCache(cacheKey, withProof2);
+
+      meta.modelUsed = secondary;
+      meta.fallbackUsed = secondary === "gemini-3-flash-preview" ? "flash" : "none";
+      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+      meta.quota = getQuotaState(secondary);
+
+      return NextResponse.json({ ok: true, data: withProof2, meta });
+    } catch (err2: any) {
+      const retryMs2 = isQuotaExceededError(err2) ? parseRetryDelayMs(err2) : retryMs;
+      meta.warnings?.push("Live quota still exceeded; refusing offline fallback. Returning 429 for retry.");
+      return NextResponse.json(
+        { ok: false, error: "quota_exceeded", retryAfterMs: retryMs2, meta },
+        { status: 429, headers: { "Retry-After": String(Math.ceil(retryMs2 / 1000)) } }
+      );
     }
   }
 
+  // Non-live modes can fall back offline.
   meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
   meta.quota = getQuotaState(primary);
 
