@@ -20,7 +20,7 @@ export default function DemoPage() {
         <div>
           <h1 style={{ fontSize: 28, marginBottom: 8 }}>MatrixMint — Judge Demo</h1>
           <p style={{ marginTop: 0, opacity: 0.8 }}>
-            Orchestrator: analyze → evidence-locked matrix → proof → export bid-ready artifacts.
+            Orchestrator: analyze → evidence-locked matrix → proof verification → bid-ready exports.
           </p>
         </div>
 
@@ -33,7 +33,7 @@ export default function DemoPage() {
               border: "1px solid #ddd",
               textDecoration: "none",
               color: "#111",
-              fontWeight: 800,
+              fontWeight: 900,
               background: "#fff",
             }}
             title="Builder view (full analyzer UI)"
@@ -41,8 +41,8 @@ export default function DemoPage() {
             Builder view
           </Link>
 
-          <span style={{ fontSize: 12, opacity: 0.75, fontWeight: 700 }}>
-            Recommended: Fast → download exports → live proof
+          <span style={{ fontSize: 12, opacity: 0.75, fontWeight: 800 }}>
+            Recommended: FAST → download exports → LIVE Proof → optional Break+Heal
           </span>
         </div>
       </div>

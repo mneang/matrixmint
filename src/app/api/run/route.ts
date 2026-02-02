@@ -11,9 +11,9 @@ import { NextRequest, NextResponse } from "next/server";
  *  - runSummary proof fields (non-breaking)
  *  - stores the bundle in an in-memory run store (for /api/runs replay)
  *
- * Focus:
- *  - Make LIVE reliable: avoid premature aborts
- *  - Emit attempt logs for judge transparency
+ * Reliability upgrade:
+ *  - Avoid https://localhost internal fetch failures (common behind proxies)
+ *  - Fallback to loopback http://127.0.0.1:<port> for internal calls when safe
  */
 
 type RunBody = {
@@ -57,7 +57,10 @@ async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs: n
     return { ...out, aborted: false as const, timeoutMs };
   } catch (e: unknown) {
     const msg = String((e as any)?.message ?? e);
-    const aborted = msg.toLowerCase().includes("aborted");
+    const aborted =
+      msg.toLowerCase().includes("aborted") ||
+      msg.toLowerCase().includes("aborterror") ||
+      msg.toLowerCase().includes("this operation was aborted");
     return {
       res: null as any,
       text: msg,
@@ -75,6 +78,122 @@ function modeFromReq(req: NextRequest): "live" | "cache" | "offline" {
   if (m === "cache") return "cache";
   if (m === "offline") return "offline";
   return "live";
+}
+
+/**
+ * Compute a safe internal origin for server-to-server calls.
+ *
+ * Problem: When the incoming request is seen as https://localhost:3000 (proxy),
+ * req.nextUrl.origin becomes https://localhost:3000. But local Next dev/prod server
+ * is often plain HTTP, so internal fetch to https://localhost fails with "fetch failed".
+ *
+ * Fix: If origin is https://localhost (or https://127.0.0.1 / 0.0.0.0), coerce to http.
+ * Also: If internal fetch still fails, fallback to loopback http://127.0.0.1:<port>
+ * when host looks local.
+ */
+function getIncomingOrigin(req: NextRequest) {
+  try {
+    return req.nextUrl.origin;
+  } catch {
+    return "";
+  }
+}
+
+function getHost(req: NextRequest) {
+  return (req.headers.get("host") || "").trim();
+}
+
+function getPortFromHost(host: string) {
+  // host could be "localhost:3000" or "127.0.0.1:3000"
+  const m = host.match(/:(\d+)$/);
+  return m?.[1] ? Number(m[1]) : null;
+}
+
+function coerceHttpsLocalhostToHttp(origin: string) {
+  if (!origin) return origin;
+  const lower = origin.toLowerCase();
+
+  const isHttps = lower.startsWith("https://");
+  const isLocal =
+    lower.startsWith("https://localhost") ||
+    lower.startsWith("https://127.0.0.1") ||
+    lower.startsWith("https://0.0.0.0");
+
+  if (isHttps && isLocal) return "http://" + origin.slice("https://".length);
+  return origin;
+}
+
+function resolveInternalOrigin(req: NextRequest) {
+  // Allow explicit override (useful for deployments / weird proxies)
+  const env = process.env.MATRIXMINT_INTERNAL_ORIGIN?.trim();
+  if (env) return env;
+
+  // Default to what Next thinks the origin is
+  const incoming = getIncomingOrigin(req);
+  return coerceHttpsLocalhostToHttp(incoming) || "http://127.0.0.1:3000";
+}
+
+function shouldTryLoopbackFallback(req: NextRequest) {
+  const host = getHost(req).toLowerCase();
+  return host.includes("localhost") || host.includes("127.0.0.1") || host.includes("0.0.0.0");
+}
+
+function loopbackOrigin(req: NextRequest) {
+  const host = getHost(req);
+  const port = getPortFromHost(host) || Number(process.env.PORT || 3000);
+  return `http://127.0.0.1:${port}`;
+}
+
+async function internalFetchJson(
+  req: NextRequest,
+  path: string,
+  init?: RequestInit,
+  timeoutMs?: number
+): Promise<{ res: Response | null; text: string; json: any; aborted?: boolean; timeoutMs?: number; urlTried: string[] }> {
+  const tried: string[] = [];
+
+  const base1 = resolveInternalOrigin(req);
+  const url1 = `${base1}${path}`;
+  tried.push(url1);
+
+  // 1) Try primary internal origin
+  try {
+    if (typeof timeoutMs === "number") {
+      const out = await fetchJsonWithTimeout(url1, init || {}, timeoutMs);
+      if (out.res) return { ...out, urlTried: tried };
+      // fallthrough if res is null (network error)
+    } else {
+      const out = await fetchJson(url1, init);
+      return { ...out, res: out.res, text: out.text, json: out.json, urlTried: tried };
+    }
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    // continue to fallback below
+    if (!timeoutMs) return { res: null, text: msg, json: null, urlTried: tried };
+  }
+
+  // 2) If local + proxy mismatch, try loopback http://127.0.0.1:<port>
+  if (shouldTryLoopbackFallback(req)) {
+    const base2 = loopbackOrigin(req);
+    const url2 = `${base2}${path}`;
+    if (!tried.includes(url2)) tried.push(url2);
+
+    try {
+      if (typeof timeoutMs === "number") {
+        const out2 = await fetchJsonWithTimeout(url2, init || {}, timeoutMs);
+        return { ...out2, urlTried: tried };
+      } else {
+        const out2 = await fetchJson(url2, init);
+        return { ...out2, urlTried: tried };
+      }
+    } catch (e: any) {
+      const msg2 = String(e?.message ?? e);
+      return { res: null, text: msg2, json: null, urlTried: tried };
+    }
+  }
+
+  // If we got here, both attempts failed
+  return { res: null, text: "fetch failed", json: null, urlTried: tried };
 }
 
 // ---- Run store (in-memory) ----
@@ -110,6 +229,9 @@ export async function POST(req: NextRequest) {
   const runId = randId("matrixmint");
   const startedAt = Date.now();
 
+  const incomingOrigin = getIncomingOrigin(req);
+  const internalOrigin = resolveInternalOrigin(req);
+
   // Attempt logs for judge trust
   const attempts: Array<{
     name: string;
@@ -119,10 +241,10 @@ export async function POST(req: NextRequest) {
     aborted: boolean;
     modelUsed?: string;
     errorPreview?: string;
+    urlTried?: string[];
   }> = [];
 
   try {
-    const origin = req.nextUrl.origin;
     const body = (await req.json().catch(() => null)) as RunBody | null;
 
     if (!body || typeof body !== "object") {
@@ -136,10 +258,22 @@ export async function POST(req: NextRequest) {
     let capabilityText = body.capabilityText;
 
     if (body.sampleId) {
-      const s = await fetchJson(`${origin}/api/samples`, { method: "GET" });
+      const s = await internalFetchJson(req, "/api/samples", { method: "GET" });
       if (!s.res?.ok || !s.json?.samples?.length) {
         return NextResponse.json(
-          { ok: false, error: "Failed to load samples", details: { status: s.res?.status, body: (s.text || "").slice(0, 200) } },
+          {
+            ok: false,
+            error: "Failed to load samples",
+            runId,
+            attempts,
+            details: {
+              status: s.res?.status ?? null,
+              preview: String(s.text || "").slice(0, 200),
+              incomingOrigin,
+              internalOrigin,
+              urlTried: s.urlTried,
+            },
+          },
           { status: 500 }
         );
       }
@@ -154,19 +288,13 @@ export async function POST(req: NextRequest) {
     }
 
     if (!rfpText || !capabilityText) {
-      return NextResponse.json(
-        { ok: false, error: "Missing rfpText or capabilityText (or provide sampleId)" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing rfpText or capabilityText (or provide sampleId)" }, { status: 400 });
     }
 
     // ---- Step 1: Analyze with lane logic ----
-    // LIVE must have enough headroom to avoid aborting just before the judge timeout.
     const LIVE_TIMEOUT_MS = 138_000;
     const CACHE_TIMEOUT_MS = 8_000;
     const OFFLINE_TIMEOUT_MS = 8_000;
-
-    const analyzeUrl = `${origin}/api/analyze`;
 
     const mkAnalyzeInit = (mode: "live" | "cache" | "offline", bust: boolean): RequestInit => {
       const h: Record<string, string> = { "Content-Type": "application/json" };
@@ -177,6 +305,10 @@ export async function POST(req: NextRequest) {
       const clear = req.headers.get("x-matrixmint-clear-cache");
       if (clear) h["x-matrixmint-clear-cache"] = clear;
 
+      // Forward demo-break-proof if present
+      const demo = req.headers.get("x-matrixmint-demo-break-proof");
+      if (demo) h["x-matrixmint-demo-break-proof"] = demo;
+
       return {
         method: "POST",
         headers: h,
@@ -186,7 +318,7 @@ export async function POST(req: NextRequest) {
 
     const tryAnalyze = async (name: string, mode: "live" | "cache" | "offline", bust: boolean, timeoutMs: number) => {
       const t0 = Date.now();
-      const r = await fetchJsonWithTimeout(analyzeUrl, mkAnalyzeInit(mode, bust), timeoutMs);
+      const r = await internalFetchJson(req, "/api/analyze", mkAnalyzeInit(mode, bust), timeoutMs);
       const elapsedMs = Date.now() - t0;
 
       const httpStatus = r.res?.status ?? null;
@@ -197,9 +329,10 @@ export async function POST(req: NextRequest) {
         ok,
         httpStatus,
         elapsedMs,
-        aborted: Boolean(r.aborted),
+        aborted: Boolean((r as any).aborted),
         modelUsed: r.json?.meta?.modelUsed,
         errorPreview: ok ? undefined : String(r.json?.error || r.text || "").slice(0, 160),
+        urlTried: (r as any).urlTried,
       });
 
       return r;
@@ -212,7 +345,6 @@ export async function POST(req: NextRequest) {
     } else if (reqMode === "cache") {
       analyzeRes = await tryAnalyze("cache_forced", "cache", false, CACHE_TIMEOUT_MS);
     } else {
-      // Live preferred; cache fallback only if live fails/times out.
       const preferred = await tryAnalyze("preferred", "live", true, LIVE_TIMEOUT_MS);
       const preferredOk = Boolean(preferred.res?.ok && preferred.json?.ok);
 
@@ -235,6 +367,8 @@ export async function POST(req: NextRequest) {
             httpStatus: analyzeRes?.res?.status ?? null,
             responsePreview: String(analyzeRes?.text || "").slice(0, 500),
             out: analyzeRes?.json ?? null,
+            incomingOrigin,
+            internalOrigin,
           },
           orchestrator: {
             runId,
@@ -258,13 +392,12 @@ export async function POST(req: NextRequest) {
     const data = analyzeOut.data;
     const meta = analyzeOut.meta;
 
-    // Determine ladderUsed + modelUsed
     const lastOkAttempt = attempts.slice().reverse().find((a) => a.ok);
     const ladderUsed =
       lastOkAttempt?.name?.includes("cache") ? "cache" : lastOkAttempt?.name?.includes("offline") ? "offline" : "live";
 
     // ---- Step 2: Bundle export ----
-    const bundle = await fetchJson(`${origin}/api/export?format=bundle_json`, {
+    const bundle = await internalFetchJson(req, "/api/export?format=bundle_json", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ result: data, meta }),
@@ -280,6 +413,9 @@ export async function POST(req: NextRequest) {
           details: {
             httpStatus: bundle.res?.status ?? null,
             responsePreview: String(bundle.text || "").slice(0, 500),
+            incomingOrigin,
+            internalOrigin,
+            urlTried: (bundle as any).urlTried,
           },
         },
         { status: 502 }
@@ -343,6 +479,7 @@ export async function POST(req: NextRequest) {
         error: String((err as any)?.message ?? "Run failed"),
         runId,
         attempts,
+        details: { incomingOrigin, internalOrigin },
       },
       { status: 500 }
     );

@@ -53,7 +53,7 @@ type AnalyzeMeta = {
   quota?: {
     blocked: boolean;
     blockedUntilUnixMs: number;
-    retryAfterSeconds: number;
+    retryAfterSeconds?: number;
     lastError: string;
   };
 };
@@ -75,7 +75,7 @@ function badgeStyle(status: CoverageStatus): React.CSSProperties {
     padding: "6px 10px",
     borderRadius: 999,
     fontSize: 12,
-    fontWeight: 700,
+    fontWeight: 800,
     border: "1px solid rgba(0,0,0,0.12)",
     whiteSpace: "nowrap",
   };
@@ -96,6 +96,7 @@ function smallPillStyle(): React.CSSProperties {
     marginRight: 8,
     marginBottom: 8,
     background: "rgba(255,255,255,0.6)",
+    fontWeight: 800,
   };
 }
 
@@ -103,7 +104,13 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-type ExportFormat = "proofpack_md" | "bidpacket_md" | "clarifications_email_md" | "risks_csv" | "proposal_draft_md" | "json";
+type ExportFormat =
+  | "proofpack_md"
+  | "bidpacket_md"
+  | "clarifications_email_md"
+  | "risks_csv"
+  | "proposal_draft_md"
+  | "json";
 
 function exportFilename(format: ExportFormat) {
   const d = new Date().toISOString().slice(0, 10);
@@ -196,7 +203,9 @@ export default function Home() {
     if (!result) return { pct: 0, covered: 0, partial: 0, missing: 0, total: 0, proof: null as null | string };
     const s = result.summary;
     const proof =
-      typeof s.proofPercent === "number" && typeof s.proofVerifiedCount === "number" && typeof s.proofTotalEvidenceRefs === "number"
+      typeof s.proofPercent === "number" &&
+      typeof s.proofVerifiedCount === "number" &&
+      typeof s.proofTotalEvidenceRefs === "number"
         ? `${Math.round(s.proofPercent)}% (${s.proofVerifiedCount}/${s.proofTotalEvidenceRefs})`
         : null;
 
@@ -215,15 +224,12 @@ export default function Home() {
     if (!q) return { blocked: false, retryAfter: 0, lastError: "" };
     let retryAfter = q.retryAfterSeconds ?? 0;
 
-    // if blockedUntilUnixMs present, compute live countdown (more accurate)
     if (q.blocked && q.blockedUntilUnixMs) {
       const ms = q.blockedUntilUnixMs - Date.now();
       retryAfter = Math.max(0, Math.ceil(ms / 1000));
     }
 
-    // use quotaTick to re-render countdown
     void quotaTick;
-
     return { blocked: !!q.blocked, retryAfter, lastError: q.lastError ?? "" };
   }, [meta, quotaTick]);
 
@@ -339,7 +345,7 @@ export default function Home() {
   const grid2: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 };
   const grid3: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 };
 
-  const label: React.CSSProperties = { fontSize: 12, fontWeight: 700, opacity: 0.8, marginBottom: 6 };
+  const label: React.CSSProperties = { fontSize: 12, fontWeight: 800, opacity: 0.8, marginBottom: 6 };
 
   const textarea: React.CSSProperties = {
     width: "100%",
@@ -360,7 +366,7 @@ export default function Home() {
     border: "1px solid rgba(0,0,0,0.14)",
     background: "black",
     color: "white",
-    fontWeight: 800,
+    fontWeight: 900,
     cursor: "pointer",
   };
 
@@ -370,7 +376,7 @@ export default function Home() {
     border: "1px solid rgba(0,0,0,0.14)",
     background: "white",
     color: "black",
-    fontWeight: 800,
+    fontWeight: 900,
     cursor: "pointer",
   };
 
@@ -378,7 +384,7 @@ export default function Home() {
     padding: "10px 12px",
     borderRadius: 12,
     border: "1px solid rgba(0,0,0,0.14)",
-    fontWeight: 800,
+    fontWeight: 900,
   };
 
   const metaRow = meta ? (
@@ -412,14 +418,13 @@ export default function Home() {
       <header style={headerStyle}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
           <div>
-            <h1 style={{ fontSize: 34, fontWeight: 900, letterSpacing: -0.5, margin: 0 }}>MatrixMint</h1>
-            <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.85 }}>
-              Proof-locked RFP compliance matrix + bid-ready exports. <span style={{ fontWeight: 800 }}>No invented capabilities.</span>
+            <h1 style={{ fontSize: 34, fontWeight: 950, letterSpacing: -0.5, margin: 0 }}>MatrixMint</h1>
+            <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.9 }}>
+              Proof-locked RFP compliance matrix + bid-ready exports. <span style={{ fontWeight: 900 }}>No invented capabilities.</span>
             </p>
           </div>
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {/* Tiny, safe win: obvious judge path */}
             <a
               href="/demo"
               style={{
@@ -428,11 +433,11 @@ export default function Home() {
                 border: "1px solid rgba(0,0,0,0.14)",
                 background: "white",
                 color: "black",
-                fontWeight: 900,
+                fontWeight: 950,
                 cursor: "pointer",
                 textDecoration: "none",
               }}
-              title="Judge-focused demo: FAST → exports → LIVE proof"
+              title="Judge-focused demo: FAST → exports → LIVE proof → optional Break+Heal"
             >
               Judge Demo →
             </a>
@@ -496,7 +501,7 @@ export default function Home() {
           <select
             value={selectedSampleId}
             onChange={(e) => setSelectedSampleId(e.target.value)}
-            style={{ ...selectStyle, minWidth: 320, fontWeight: 700 }}
+            style={{ ...selectStyle, minWidth: 320, fontWeight: 800 }}
           >
             {samples.map((s) => (
               <option key={s.id} value={s.id}>
@@ -505,16 +510,16 @@ export default function Home() {
             ))}
           </select>
 
-          <span style={{ fontSize: 12, opacity: 0.75 }}>
-            Flash for iteration. Pro for final demo — but Auto will protect you under quota.
+          <span style={{ fontSize: 12, opacity: 0.8 }}>
+            Flash for iteration. Pro for final demo. Auto protects under quota.
           </span>
         </div>
 
         {metaRow}
 
         {meta?.warnings?.length ? (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
-            <div style={{ fontWeight: 900, marginBottom: 4 }}>Warnings</div>
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+            <div style={{ fontWeight: 950, marginBottom: 4 }}>Warnings</div>
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               {meta.warnings.slice(0, 6).map((w, i) => (
                 <li key={i} style={{ marginBottom: 4 }}>
@@ -535,7 +540,7 @@ export default function Home() {
               background: "rgba(239,68,68,0.08)",
             }}
           >
-            <div style={{ fontWeight: 900 }}>Error</div>
+            <div style={{ fontWeight: 950 }}>Error</div>
             <div style={{ marginTop: 6, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
               {error}
             </div>
@@ -560,8 +565,8 @@ export default function Home() {
           <>
             <section style={{ marginTop: 16, ...grid3 }}>
               <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.8 }}>Coverage</div>
-                <div style={{ marginTop: 6, fontSize: 34, fontWeight: 900 }}>{coverage.pct.toFixed(0)}%</div>
+                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Coverage</div>
+                <div style={{ marginTop: 6, fontSize: 34, fontWeight: 950 }}>{coverage.pct.toFixed(0)}%</div>
 
                 <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <span style={smallPillStyle()}>Covered: {coverage.covered}</span>
@@ -575,13 +580,13 @@ export default function Home() {
                   <div style={{ width: `${coverage.pct}%`, height: "100%", background: "black" }} />
                 </div>
 
-                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
                   Coverage is conservative by design. Proof is the credibility layer.
                 </div>
               </div>
 
               <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.8 }}>Top Risks</div>
+                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Top Risks</div>
                 <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
                   {result.summary.topRisks?.slice(0, 8).map((r, i) => (
                     <li key={i} style={{ marginBottom: 8, fontSize: 13 }}>
@@ -592,7 +597,7 @@ export default function Home() {
               </div>
 
               <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.8 }}>Next Actions</div>
+                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Next Actions</div>
                 <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
                   {result.summary.nextActions?.slice(0, 8).map((a, i) => (
                     <li key={i} style={{ marginBottom: 8, fontSize: 13 }}>
@@ -606,8 +611,8 @@ export default function Home() {
             <section ref={matrixRef} style={{ marginTop: 16, ...card }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                 <div>
-                  <div style={{ fontSize: 18, fontWeight: 900 }}>Compliance Matrix</div>
-                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
+                  <div style={{ fontSize: 18, fontWeight: 950 }}>Compliance Matrix</div>
+                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
                     Filter by status/category and search by ID, text, evidence, or risks.
                   </div>
                 </div>
@@ -649,7 +654,7 @@ export default function Home() {
                           style={{
                             textAlign: "left",
                             fontSize: 12,
-                            fontWeight: 900,
+                            fontWeight: 950,
                             padding: "10px 10px",
                             borderBottom: "1px solid rgba(0,0,0,0.14)",
                             background: "rgba(0,0,0,0.03)",
@@ -665,15 +670,15 @@ export default function Home() {
                   <tbody>
                     {filteredRequirements.map((r) => (
                       <tr key={r.id}>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontWeight: 900, fontSize: 12, whiteSpace: "nowrap" }}>
+                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontWeight: 950, fontSize: 12, whiteSpace: "nowrap" }}>
                           {r.id}
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontSize: 12, whiteSpace: "nowrap" }}>
                           {r.category}
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
-                          <div style={{ fontSize: 13, fontWeight: 800 }}>{r.text}</div>
-                          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>{r.responseSummary}</div>
+                          <div style={{ fontSize: 13, fontWeight: 900 }}>{r.text}</div>
+                          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>{r.responseSummary}</div>
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
                           <span style={badgeStyle(r.status)}>{r.status}</span>
@@ -681,15 +686,15 @@ export default function Home() {
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
                           {r.evidenceIds?.length ? (
                             <>
-                              <div style={{ fontWeight: 900, fontSize: 12 }}>{r.evidenceIds.join(", ")}</div>
+                              <div style={{ fontWeight: 950, fontSize: 12 }}>{r.evidenceIds.join(", ")}</div>
                               {r.evidenceQuotes?.slice(0, 2).map((q, i) => (
-                                <div key={i} style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+                                <div key={i} style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
                                   “{q}”
                                 </div>
                               ))}
                             </>
                           ) : (
-                            <div style={{ fontSize: 12, opacity: 0.7 }}>—</div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>—</div>
                           )}
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
@@ -702,7 +707,7 @@ export default function Home() {
                               ))}
                             </ul>
                           ) : (
-                            <div style={{ fontSize: 12, opacity: 0.7 }}>—</div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>—</div>
                           )}
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
@@ -715,7 +720,7 @@ export default function Home() {
                               ))}
                             </div>
                           ) : (
-                            <div style={{ fontSize: 12, opacity: 0.7 }}>—</div>
+                            <div style={{ fontSize: 12, opacity: 0.75 }}>—</div>
                           )}
                         </td>
                       </tr>
@@ -723,7 +728,7 @@ export default function Home() {
                   </tbody>
                 </table>
 
-                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
                   Showing {filteredRequirements.length} / {result.requirements.length} requirements.
                 </div>
               </div>
@@ -731,12 +736,12 @@ export default function Home() {
 
             <section style={{ marginTop: 16, ...grid2 }}>
               <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.8 }}>Proposal: Executive Summary</div>
+                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Proposal: Executive Summary</div>
                 <div style={{ marginTop: 10, fontSize: 13, lineHeight: 1.6 }}>{result.proposalOutline.executiveSummary}</div>
               </div>
 
               <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.8 }}>Proposal: Sections</div>
+                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Proposal: Sections</div>
                 <ol style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
                   {result.proposalOutline.sections.map((s, i) => (
                     <li key={i} style={{ marginBottom: 8, fontSize: 13 }}>
@@ -749,7 +754,7 @@ export default function Home() {
           </>
         ) : (
           <section style={{ marginTop: 16, ...card }}>
-            <div style={{ fontSize: 16, fontWeight: 900 }}>How to use</div>
+            <div style={{ fontSize: 16, fontWeight: 950 }}>How to use</div>
             <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.7 }}>
               <li>
                 Click <b>Load Sample</b> (or paste your own RFP + Capability Brief).
@@ -760,9 +765,12 @@ export default function Home() {
               <li>
                 Use <b>Download</b> to export a Proof Pack, Bid-Ready Packet, or Clarifications Email.
               </li>
+              <li>
+                For judge flow, click <b>Judge Demo →</b> and follow FAST → exports → LIVE proof → Break+Heal.
+              </li>
             </ol>
-            <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
-              This is not a chatbot wrapper. It is a proof-locked compliance and export system.
+            <div style={{ marginTop: 12, fontSize: 12, opacity: 0.85 }}>
+              This is not a chatbot wrapper. It is a proof-locked compliance + export system with verifier-driven integrity.
             </div>
           </section>
         )}

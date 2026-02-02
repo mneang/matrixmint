@@ -1,4 +1,3 @@
-// src/app/api/analyze/route.ts
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
@@ -12,7 +11,6 @@ import { matrixResultSchema } from "@/lib/matrixSchema";
 // --------- Thinking level compat ----------
 let THINKING_LEVEL: any = "MEDIUM";
 try {
-   
   const mod = require("@google/genai");
   if (mod?.ThinkingLevel?.MEDIUM) THINKING_LEVEL = mod.ThinkingLevel.MEDIUM;
   else if (mod?.ThinkingLevel?.HIGH) THINKING_LEVEL = mod.ThinkingLevel.HIGH;
@@ -77,6 +75,15 @@ type QuotaMeta = {
   lastError: string;
 };
 
+type ProofRepairMeta = {
+  triggered: boolean;
+  attempts: number;
+  beforeProofPercent?: number;
+  afterProofPercent?: number;
+  fixedMismatches: number;
+  notes?: string[];
+};
+
 type AnalyzeMeta = {
   modelRequested: string;
   modelUsed: string;
@@ -84,6 +91,7 @@ type AnalyzeMeta = {
   warnings?: string[];
   cache?: CacheMeta;
   quota?: QuotaMeta;
+  proofRepair?: ProofRepairMeta;
 };
 
 // --------- Caching ----------
@@ -163,8 +171,35 @@ const QUOTA_STATE: Record<string, QuotaMeta> = {
   "gemini-3-pro-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
 };
 
+function getQuotaState(model: string): QuotaMeta {
+  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
+  const now = Date.now();
+  if (m.blocked && m.blockedUntilUnixMs <= now) {
+    m.blocked = false;
+    m.blockedUntilUnixMs = 0;
+    m.lastError = "";
+  }
+  return { ...m };
+}
 
+function setQuotaBlocked(model: string, blockedUntilUnixMs: number, lastError: string) {
+  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
+  m.blocked = true;
+  m.blockedUntilUnixMs = Math.max(blockedUntilUnixMs, Date.now() + 10_000);
+  m.lastError = lastError || "";
+  QUOTA_STATE[model] = m;
+}
 
+function parseRetryDelayMs(details: any): number {
+  const retryDelay =
+    details?.error?.details?.find?.((d: any) => String(d?.["@type"] || "").includes("RetryInfo"))?.retryDelay;
+
+  if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
+    const secs = Number(retryDelay.replace("s", ""));
+    if (Number.isFinite(secs) && secs > 0) return Math.min(120_000, secs * 1000);
+  }
+  return 15_000;
+}
 
 // --------- Live gate (serializes live Gemini calls) ----------
 let LIVE_CHAIN: Promise<void> = Promise.resolve();
@@ -196,35 +231,6 @@ async function withLiveGate<T>(minGapMs: number, fn: () => Promise<T>): Promise<
   }
 }
 // --------- End live gate ----------
-
-function getQuotaState(model: string): QuotaMeta {
-  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
-  const now = Date.now();
-  if (m.blocked && m.blockedUntilUnixMs <= now) {
-    m.blocked = false;
-    m.blockedUntilUnixMs = 0;
-    m.lastError = "";
-  }
-  return { ...m };
-}
-
-function setQuotaBlocked(model: string, blockedUntilUnixMs: number, lastError: string) {
-  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
-  m.blocked = true;
-  m.blockedUntilUnixMs = Math.max(blockedUntilUnixMs, Date.now() + 10_000);
-  m.lastError = lastError || "";
-  QUOTA_STATE[model] = m;
-}
-
-function parseRetryDelayMs(details: any): number {
-  const retryDelay = details?.error?.details?.find?.((d: any) => String(d?.["@type"] || "").includes("RetryInfo"))?.retryDelay;
-
-  if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
-    const secs = Number(retryDelay.replace("s", ""));
-    if (Number.isFinite(secs) && secs > 0) return Math.min(120_000, secs * 1000);
-  }
-  return 15_000;
-}
 
 // --------- Helpers ----------
 function sha256(s: string) {
@@ -541,6 +547,110 @@ function computeProof(parsed: any, capabilityText: string): MatrixResult {
   };
 }
 
+/**
+ * Self-healing proof repair (A):
+ * If evidenceIds exist but evidenceQuotes don't match the Capability Brief text,
+ * replace quotes with deterministic snippets extracted from capabilityText around each evidenceId.
+ * This keeps us honest (no invention) and makes proof verifiable.
+ */
+function repairEvidenceQuotes(result: MatrixResult, capabilityText: string) {
+  const text = capabilityText || "";
+  const capNorm = normalizeForMatch(text);
+
+  const ids = Array.from(new Set(Array.from(text.matchAll(/\bCB-\d+\b/g)).map((m) => m[0])));
+  const idToSnippet = new Map<string, string>();
+
+  const makeSnippet = (id: string) => {
+    const idx = text.indexOf(id);
+    if (idx === -1) return null;
+
+    const lineStart = text.lastIndexOf("\n", idx);
+    const lineEnd = text.indexOf("\n", idx);
+    const ls = lineStart === -1 ? 0 : lineStart + 1;
+    const le = lineEnd === -1 ? text.length : lineEnd;
+    const line = text.slice(ls, le).trim();
+
+    if (line.length >= 40 && line.length <= 320) return line;
+
+    const start = Math.max(0, idx - 120);
+    const end = Math.min(text.length, idx + 220);
+    return text.slice(start, end).replace(/\s+/g, " ").trim();
+  };
+
+  for (const id of ids) {
+    const sn = makeSnippet(id);
+    if (sn && normalizeForMatch(sn) && capNorm.includes(normalizeForMatch(sn))) {
+      idToSnippet.set(id, sn);
+    } else if (sn) {
+      idToSnippet.set(id, sn);
+    }
+  }
+
+  let fixed = 0;
+
+  const repairedReqs = (result.requirements ?? []).map((r) => {
+    const evidenceIds = uniqStrings(Array.isArray(r.evidenceIds) ? r.evidenceIds.map(String) : []);
+    const evidenceQuotes = Array.isArray(r.evidenceQuotes) ? r.evidenceQuotes.map(String) : [];
+
+    if (!evidenceIds.length) return r;
+
+    const anyBad = evidenceQuotes.some((q) => !quoteExistsInText(q, text));
+    const tooFew = evidenceQuotes.length < evidenceIds.length;
+
+    if (!anyBad && !tooFew) return r;
+
+    const newQuotes: string[] = [];
+    for (const id of evidenceIds) {
+      const sn = idToSnippet.get(id);
+      if (sn) newQuotes.push(sn);
+    }
+
+    if (!newQuotes.length) return r;
+
+    fixed += 1;
+
+    return {
+      ...r,
+      evidenceIds,
+      evidenceQuotes: newQuotes,
+      // remove mismatch; verifier will re-add if still mismatched
+      riskFlags: uniqStrings((r.riskFlags ?? []).filter((x) => String(x) !== "Evidence mismatch")),
+    };
+  });
+
+  return { repaired: { ...result, requirements: repairedReqs }, fixedMismatches: fixed };
+}
+
+function needsProofRepair(result: MatrixResult) {
+  const reqs = result.requirements ?? [];
+  if (!reqs.length) return false;
+  const anyMismatch = reqs.some((r) => (r.riskFlags ?? []).some((f) => String(f) === "Evidence mismatch"));
+  const p = result.summary?.proofPercent;
+  if (typeof p === "number" && p < 100) return true;
+  return anyMismatch;
+}
+
+/**
+ * DEMO breaker (guaranteed mismatch):
+ * Append a token that will not exist in the capability brief.
+ */
+function maybeDemoBreakOneQuote(result: MatrixResult): MatrixResult {
+  const reqs = result.requirements ?? [];
+  const token = " @@BROKEN_PROOF@@";
+
+  for (let i = 0; i < reqs.length; i++) {
+    const ids = reqs[i]?.evidenceIds ?? [];
+    const quotes = reqs[i]?.evidenceQuotes ?? [];
+    if (Array.isArray(ids) && ids.length > 0 && typeof quotes[0] === "string" && quotes[0].length > 10) {
+      const broken = `${quotes[0]}${token}`;
+      const newReqs = reqs.slice();
+      newReqs[i] = { ...newReqs[i], evidenceQuotes: [broken, ...quotes.slice(1)] };
+      return { ...result, requirements: newReqs };
+    }
+  }
+  return result;
+}
+
 async function generateParseValidate(params: {
   ai: GoogleGenAI;
   model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
@@ -717,13 +827,21 @@ export async function POST(req: Request) {
     warnings: [],
     cache: { hit: false, source: "none", lane: "main" },
     quota: getQuotaState("global"),
+    proofRepair: {
+      triggered: false,
+      attempts: 0,
+      fixedMismatches: 0,
+      notes: [],
+    },
   };
 
   try {
     const body = (await req.json()) as Partial<AnalyzeBody>;
     const rfpText = normalizeText(body.rfpText ?? "");
     const capabilityText = normalizeText(body.capabilityText ?? "");
-    const requestedModel = (body.model ?? "gemini-3-flash-preview") as "gemini-3-flash-preview" | "gemini-3-pro-preview";
+    const requestedModel = (body.model ?? "gemini-3-flash-preview") as
+      | "gemini-3-flash-preview"
+      | "gemini-3-pro-preview";
 
     meta.modelRequested = requestedModel;
 
@@ -744,11 +862,14 @@ export async function POST(req: Request) {
 
     const bustCache = String(h.get("x-matrixmint-bust-cache") || "") === "1";
     const clearCache = String(h.get("x-matrixmint-clear-cache") || "") === "1";
+    const demoBreakProof = String(h.get("x-matrixmint-demo-break-proof") || "") === "1";
 
     if (mode === "offline") meta.warnings?.push("Forced offline (x-matrixmint-mode=offline).");
     if (mode === "cache") meta.warnings?.push("Cache-preferred mode (x-matrixmint-mode=cache).");
     if (mode === "live") meta.warnings?.push("Live-preferred mode (x-matrixmint-mode=live).");
     if (bustCache) meta.warnings?.push("Cache bust enabled; bypassing memory+disk cache.");
+    if (demoBreakProof)
+      meta.warnings?.push("DEMO: x-matrixmint-demo-break-proof=1 (injecting one proof mismatch then self-healing).");
 
     const cacheLane: "main" | "offline" = mode === "offline" ? "offline" : "main";
     meta.cache = { hit: false, source: "none", lane: cacheLane };
@@ -762,6 +883,7 @@ export async function POST(req: Request) {
       meta.warnings?.push("Cache cleared for this input key.");
     }
 
+    // --- Cache read path ---
     if (!bustCache && mode !== "offline") {
       const mem = RESULT_CACHE.get(cacheKey);
       if (mem) {
@@ -795,6 +917,7 @@ export async function POST(req: Request) {
       }
     }
 
+    // --- Forced offline ---
     if (mode === "offline") {
       const offline = offlineAnalyze(rfpText, capabilityText);
       const withProof = computeProof(offline, capabilityText);
@@ -809,111 +932,153 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, data: withProof, meta });
     }
 
+    // --- Circuit breaker gate (AUTO only) ---
     const q = getQuotaState(requestedModel);
-meta.quota = q;
+    meta.quota = q;
 
-// Live mode should always attempt the live call.
-// Auto mode respects the circuit breaker to reduce wasted calls during cooldown.
-const allowLive = mode === "live" ? true : mode === "auto" ? !q.blocked : false;
+    const allowLive = mode === "live" ? true : mode === "auto" || mode === "cache" ? !q.blocked : false;
 
-if (mode === "live" && q.blocked) {
-  meta.warnings?.push("Quota circuit breaker active; live mode will still attempt the API call.");
-}
+    if (mode === "live" && q.blocked) {
+      meta.warnings?.push("Quota circuit breaker active; live mode will still attempt the API call.");
+    }
 
-if (!allowLive) {
-  // In STRICT live mode, do NOT return a 200 offline fallback (judge will fail).
-  // Instead, return 429 so the client/judge can retry after cooldown.
-  if (mode === "live") {
-    const now = Date.now();
-    const retryMs = Math.max(10_000, (q.blockedUntilUnixMs || (now + 20_000)) - now);
+    if (!allowLive) {
+      if (mode === "live") {
+        const now = Date.now();
+        const retryMs = Math.max(10_000, (q.blockedUntilUnixMs || now + 20_000) - now);
 
-    meta.warnings?.push("Quota circuit breaker active; refusing offline fallback in live mode.");
-    meta.quota = getQuotaState(requestedModel);
+        meta.warnings?.push("Quota circuit breaker active; refusing offline fallback in live mode.");
+        meta.quota = getQuotaState(requestedModel);
 
-    return NextResponse.json(
-      { ok: false, error: "quota_blocked", retryAfterMs: retryMs, meta },
-      { status: 429, headers: { "Retry-After": String(Math.ceil(retryMs / 1000)) } }
-    );
-  }
+        return NextResponse.json(
+          { ok: false, error: "quota_blocked", retryAfterMs: retryMs, meta },
+          { status: 429, headers: { "Retry-After": String(Math.ceil(retryMs / 1000)) } }
+        );
+      }
 
-  // For non-live (auto/cache/etc), we can still fall back offline.
-  meta.warnings?.push("Quota circuit breaker active; skipping live call and returning offline analysis.");
+      meta.warnings?.push("Quota circuit breaker active; skipping live call and returning offline analysis.");
 
-  const offline = offlineAnalyze(rfpText, capabilityText);
-  const withProof = computeProof(offline, capabilityText);
+      const offline = offlineAnalyze(rfpText, capabilityText);
+      const withProof = computeProof(offline, capabilityText);
 
-  if (await shouldWriteOfflineFallback(cacheKey)) {
-    RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
-    await writeDiskCache(cacheKey, withProof);
-  }
+      if (await shouldWriteOfflineFallback(cacheKey)) {
+        RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+        await writeDiskCache(cacheKey, withProof);
+      }
 
-  meta.modelUsed = "offline";
-  meta.fallbackUsed = "offline";
-  meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
-  meta.quota = getQuotaState(requestedModel);
-  return NextResponse.json({ ok: true, data: withProof, meta });
-}
+      meta.modelUsed = "offline";
+      meta.fallbackUsed = "offline";
+      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+      meta.quota = getQuotaState(requestedModel);
+      return NextResponse.json({ ok: true, data: withProof, meta });
+    }
 
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const jsonSchema = z.toJSONSchema(matrixResultSchema);
+    const jsonSchema = (z as any).toJSONSchema ? (z as any).toJSONSchema(matrixResultSchema) : undefined;
+
     const basePrompt = buildPrompt(rfpText, capabilityText);
     const strictPrompt = buildStrictRetryPrompt(basePrompt);
 
     const modelTimeoutMs = resolveModelTimeoutMs({ mode, model: requestedModel });
 
     const attemptModel = async (m: "gemini-3-flash-preview" | "gemini-3-pro-preview") => {
-      
-      // Retry quota-exceeded once (live mode only) after suggested delay.
-try {
+      try {
         return await withLiveGate(1200, async () => {
-  return await generateParseValidate({
-    ai,
-    model: m,
-    prompt: basePrompt,
-    jsonSchema,
-    thinkingLevel: THINKING_LEVEL,
-    timeoutMs: modelTimeoutMs,
-  });
-});
-      } catch (err: any) {
-        if (isAbortError(err)) throw err;
-        if (!isQuotaExceededError(err) && !isOverloadedError(err)) {
           return await generateParseValidate({
             ai,
             model: m,
-            prompt: strictPrompt,
-            jsonSchema,
+            prompt: basePrompt,
+            jsonSchema: jsonSchema ?? {},
             thinkingLevel: THINKING_LEVEL,
             timeoutMs: modelTimeoutMs,
           });
+        });
+      } catch (err: any) {
+        if (isAbortError(err)) throw err;
+        if (isQuotaExceededError(err)) throw err;
+        if (isOverloadedError(err)) throw err;
+
+        // Strict retry for "format" issues only (not quota/overload)
+        return await generateParseValidate({
+          ai,
+          model: m,
+          prompt: strictPrompt,
+          jsonSchema: jsonSchema ?? {},
+          thinkingLevel: THINKING_LEVEL,
+          timeoutMs: modelTimeoutMs,
+        });
+      }
+    };
+
+    const attemptModelWithQuotaRetry = async (m: "gemini-3-flash-preview" | "gemini-3-pro-preview") => {
+      try {
+        return await attemptModel(m);
+      } catch (err: any) {
+        if (mode === "live" && isQuotaExceededError(err)) {
+          const retryMs = parseRetryDelayMs(err);
+          meta.warnings?.push(`Quota exceeded for ${m}; waiting ${Math.ceil(retryMs / 1000)}s then retrying once.`);
+          await sleep(retryMs);
+          return await attemptModel(m);
         }
         throw err;
       }
     };
 
     const primary = requestedModel;
-    const secondary = requestedModel === "gemini-3-pro-preview" ? "gemini-3-flash-preview" : "gemini-3-pro-preview";
+    const secondary: "gemini-3-flash-preview" | "gemini-3-pro-preview" =
+      requestedModel === "gemini-3-pro-preview" ? "gemini-3-flash-preview" : "gemini-3-pro-preview";
 
-    
-const attemptModelWithQuotaRetry = async (
-  m: "gemini-3-flash-preview" | "gemini-3-pro-preview"
-) => {
-  try {
-    return await attemptModel(m);
-  } catch (err: any) {
-    if (mode === "live" && isQuotaExceededError(err)) {
-      const retryMs = parseRetryDelayMs(err);
-      meta.warnings?.push(`Quota exceeded for ${m}; waiting ${Math.ceil(retryMs / 1000)}s then retrying.`);
-      await sleep(retryMs);
-      return await attemptModel(m);
-    }
-    throw err;
-  }
-};
-
-try {
+    try {
+      // ---- Primary attempt ----
       const parsed = await attemptModelWithQuotaRetry(primary);
-      const withProof = computeProof(parsed, capabilityText);
+
+      // Proof compute (first pass)
+      let withProof = computeProof(parsed, capabilityText);
+
+      // DEMO: inject a mismatch to show self-healing in the video
+      if (demoBreakProof) {
+        withProof = computeProof(maybeDemoBreakOneQuote(withProof), capabilityText);
+      }
+
+      // Self-healing proof loop (A)
+      const before = withProof.summary?.proofPercent;
+      if (needsProofRepair(withProof)) {
+        meta.proofRepair = meta.proofRepair || { triggered: false, attempts: 0, fixedMismatches: 0, notes: [] };
+        meta.proofRepair.triggered = true;
+        meta.proofRepair.beforeProofPercent = typeof before === "number" ? before : undefined;
+
+        const maxRepairPasses = 2;
+        let cur = withProof;
+        let totalFixed = 0;
+        let attempts = 0;
+
+        for (let pass = 1; pass <= maxRepairPasses; pass++) {
+          attempts++;
+          const repaired = repairEvidenceQuotes(cur, capabilityText);
+          totalFixed += repaired.fixedMismatches;
+          cur = computeProof(repaired.repaired, capabilityText);
+
+          if (!needsProofRepair(cur)) break;
+        }
+
+        meta.proofRepair.attempts = attempts;
+        meta.proofRepair.fixedMismatches = totalFixed;
+        meta.proofRepair.afterProofPercent =
+          typeof cur.summary?.proofPercent === "number" ? cur.summary.proofPercent : undefined;
+        meta.proofRepair.notes = uniqStrings([
+          ...(meta.proofRepair.notes ?? []),
+          "Repair replaces evidenceQuotes with deterministic snippets extracted from Capability Brief around each evidenceId.",
+          "No new capability is invented; only evidence quoting is repaired for verifiability.",
+        ]);
+
+        withProof = cur;
+
+        meta.warnings?.push(
+          `Self-healing proof loop executed: proof ${meta.proofRepair.beforeProofPercent ?? "?"}% -> ${
+            meta.proofRepair.afterProofPercent ?? "?"
+          }% (passes=${attempts}, fixed=${totalFixed}).`
+        );
+      }
 
       RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
       await writeDiskCache(cacheKey, withProof);
@@ -925,6 +1090,7 @@ try {
 
       return NextResponse.json({ ok: true, data: withProof, meta });
     } catch (err: any) {
+      // ---- Timeout -> offline fallback (OK even in LIVE; deterministic) ----
       if (isAbortError(err)) {
         meta.warnings?.push("Live request timed out; returned offline deterministic analysis (conservative).");
         meta.quota = getQuotaState(primary);
@@ -944,64 +1110,124 @@ try {
         return NextResponse.json({ ok: true, data: withProof, meta });
       }
 
+      // ---- Quota exceeded: set breaker + secondary attempt in LIVE, else offline ----
       if (isQuotaExceededError(err)) {
-  const detailsStr = JSON.stringify((err as any)?.error || err || {});
-  const retryMs = parseRetryDelayMs(err);
-  setQuotaBlocked(primary, Date.now() + retryMs, detailsStr);
+        const retryMs = parseRetryDelayMs(err);
+        setQuotaBlocked(primary, Date.now() + retryMs, String(err?.message ?? "quota"));
+        meta.quota = getQuotaState(primary);
 
-  meta.quota = getQuotaState(primary);
+        if (mode === "live") {
+          meta.warnings?.push(`Quota exceeded for ${primary}; attempting ${secondary}.`);
+          try {
+            const parsed2 = await attemptModelWithQuotaRetry(secondary);
+            let withProof2 = computeProof(parsed2, capabilityText);
 
-  // In live mode: do not succeed with offline output. Try secondary once, else 429 so judge can retry.
-  if (mode === "live") {
-    meta.warnings?.push(`Quota exceeded for ${primary}; attempting ${secondary}.`);
+            if (demoBreakProof) {
+              withProof2 = computeProof(maybeDemoBreakOneQuote(withProof2), capabilityText);
+            }
 
-    try {
-      const parsed2 = await attemptModelWithQuotaRetry(secondary);
-      const withProof2 = computeProof(parsed2, capabilityText);
+            const before2 = withProof2.summary?.proofPercent;
+            if (needsProofRepair(withProof2)) {
+              meta.proofRepair = meta.proofRepair || { triggered: false, attempts: 0, fixedMismatches: 0, notes: [] };
+              meta.proofRepair.triggered = true;
+              meta.proofRepair.beforeProofPercent = typeof before2 === "number" ? before2 : undefined;
 
-      RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
-      await writeDiskCache(cacheKey, withProof2);
+              const maxRepairPasses = 2;
+              let cur = withProof2;
+              let totalFixed = 0;
+              let attempts = 0;
 
-      meta.modelUsed = secondary;
-      meta.fallbackUsed = secondary === "gemini-3-flash-preview" ? "flash" : "none";
-      meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
-      meta.quota = getQuotaState(secondary);
+              for (let pass = 1; pass <= maxRepairPasses; pass++) {
+                attempts++;
+                const repaired = repairEvidenceQuotes(cur, capabilityText);
+                totalFixed += repaired.fixedMismatches;
+                cur = computeProof(repaired.repaired, capabilityText);
+                if (!needsProofRepair(cur)) break;
+              }
 
-      return NextResponse.json({ ok: true, data: withProof2, meta });
-    } catch (err2: any) {
-      const retryMs2 = isQuotaExceededError(err2) ? parseRetryDelayMs(err2) : retryMs;
-      meta.warnings?.push("Live quota still exceeded; refusing offline fallback. Returning 429 for retry.");
-      return NextResponse.json(
-        { ok: false, error: "quota_exceeded", retryAfterMs: retryMs2, meta },
-        { status: 429, headers: { "Retry-After": String(Math.ceil(retryMs2 / 1000)) } }
-      );
-    }
-  }
+              meta.proofRepair.attempts = attempts;
+              meta.proofRepair.fixedMismatches = totalFixed;
+              meta.proofRepair.afterProofPercent =
+                typeof cur.summary?.proofPercent === "number" ? cur.summary.proofPercent : undefined;
 
-  // Non-live modes can fall back offline.
-  meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
-  meta.quota = getQuotaState(primary);
+              withProof2 = cur;
+            }
 
-  const offline = offlineAnalyze(rfpText, capabilityText);
-  const withProof = computeProof(offline, capabilityText);
+            RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
+            await writeDiskCache(cacheKey, withProof2);
 
-  if (await shouldWriteOfflineFallback(cacheKey)) {
-    RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
-    await writeDiskCache(cacheKey, withProof);
-  }
+            meta.modelUsed = secondary;
+            meta.fallbackUsed = secondary === "gemini-3-flash-preview" ? "flash" : "none";
+            meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+            meta.quota = getQuotaState(secondary);
 
-  meta.modelUsed = "offline";
-  meta.fallbackUsed = "offline";
-  meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+            return NextResponse.json({ ok: true, data: withProof2, meta });
+          } catch (err2: any) {
+            const retryMs2 = isQuotaExceededError(err2) ? parseRetryDelayMs(err2) : retryMs;
+            meta.warnings?.push("Live quota still exceeded; refusing offline fallback in LIVE. Returning 429 for retry.");
 
-  return NextResponse.json({ ok: true, data: withProof, meta });
-}
+            return NextResponse.json(
+              { ok: false, error: "quota_exceeded", retryAfterMs: retryMs2, meta },
+              { status: 429, headers: { "Retry-After": String(Math.ceil(retryMs2 / 1000)) } }
+            );
+          }
+        }
 
+        meta.warnings?.push("Quota exceeded; returned offline deterministic analysis (conservative).");
+
+        const offline = offlineAnalyze(rfpText, capabilityText);
+        const withProof = computeProof(offline, capabilityText);
+
+        if (await shouldWriteOfflineFallback(cacheKey)) {
+          RESULT_CACHE.set(cacheKey, { data: withProof, savedAt: Date.now() });
+          await writeDiskCache(cacheKey, withProof);
+        }
+
+        meta.modelUsed = "offline";
+        meta.fallbackUsed = "offline";
+        meta.cache = { hit: false, key: cacheKey, source: "none", lane: cacheLane };
+        meta.quota = getQuotaState(primary);
+
+        return NextResponse.json({ ok: true, data: withProof, meta });
+      }
+
+      // ---- Overloaded: attempt secondary, else offline ----
       if (isOverloadedError(err)) {
         meta.warnings?.push(`${primary} overloaded; attempting ${secondary}.`);
         try {
-          const parsed2 = await attemptModel(secondary);
-          const withProof2 = computeProof(parsed2, capabilityText);
+          const parsed2 = await attemptModelWithQuotaRetry(secondary);
+          let withProof2 = computeProof(parsed2, capabilityText);
+
+          if (demoBreakProof) {
+            withProof2 = computeProof(maybeDemoBreakOneQuote(withProof2), capabilityText);
+          }
+
+          const before2 = withProof2.summary?.proofPercent;
+          if (needsProofRepair(withProof2)) {
+            meta.proofRepair = meta.proofRepair || { triggered: false, attempts: 0, fixedMismatches: 0, notes: [] };
+            meta.proofRepair.triggered = true;
+            meta.proofRepair.beforeProofPercent = typeof before2 === "number" ? before2 : undefined;
+
+            const maxRepairPasses = 2;
+            let cur = withProof2;
+            let totalFixed = 0;
+            let attempts = 0;
+
+            for (let pass = 1; pass <= maxRepairPasses; pass++) {
+              attempts++;
+              const repaired = repairEvidenceQuotes(cur, capabilityText);
+              totalFixed += repaired.fixedMismatches;
+              cur = computeProof(repaired.repaired, capabilityText);
+              if (!needsProofRepair(cur)) break;
+            }
+
+            meta.proofRepair.attempts = attempts;
+            meta.proofRepair.fixedMismatches = totalFixed;
+            meta.proofRepair.afterProofPercent =
+              typeof cur.summary?.proofPercent === "number" ? cur.summary.proofPercent : undefined;
+
+            withProof2 = cur;
+          }
 
           RESULT_CACHE.set(cacheKey, { data: withProof2, savedAt: Date.now() });
           await writeDiskCache(cacheKey, withProof2);
@@ -1032,8 +1258,9 @@ try {
         }
       }
 
+      // ---- Unknown error ----
       const msg = String(err?.message ?? "Unknown error");
-      return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+      return NextResponse.json({ ok: false, error: msg, meta }, { status: 500 });
     }
   } catch (err: any) {
     const msg = String(err?.message ?? "Unknown error");

@@ -1,0 +1,64 @@
+{
+  "savedAt": 1770006309361,
+  "data": {
+    "summary": {
+      "totalRequirements": 1,
+      "coveredCount": 0,
+      "partialCount": 1,
+      "missingCount": 0,
+      "coveragePercent": 0,
+      "topRisks": [
+        "High ambiguity in capability mapping",
+        "Minimal documentation for verification"
+      ],
+      "nextActions": [
+        "Request detailed technical specifications",
+        "Conduct a gap analysis meeting"
+      ],
+      "proofVerifiedCount": 1,
+      "proofTotalEvidenceRefs": 1,
+      "proofPercent": 100,
+      "proofNotes": [
+        "The evidence provided is limited to a single statement.",
+        "Proof verifier checks evidenceQuotes against the Capability Brief text (normalized matching; ellipsis wildcard supported).",
+        "The \"Evidence mismatch\" flag is verifier-owned and is only added/removed by the proof verifier.",
+        "Proof totals count unpaired evidence IDs (IDs without quotes) as unverified references (conservative scoring)."
+      ]
+    },
+    "requirements": [
+      {
+        "id": "GEN-01",
+        "category": "Functional",
+        "text": "The system shall address the requirements of the test rfp.",
+        "status": "Partial",
+        "responseSummary": "The capability brief indicates a 'test cap' which partially addresses the 'test rfp' requirement.",
+        "evidenceIds": [
+          "CB-01"
+        ],
+        "evidenceQuotes": [
+          "test cap"
+        ],
+        "gapsOrQuestions": [
+          "What specific features are included in 'test cap'?",
+          "How does 'test cap' specifically satisfy 'test rfp'?"
+        ],
+        "riskFlags": [
+          "Ambiguity",
+          "Insufficient Detail"
+        ]
+      }
+    ],
+    "proposalOutline": {
+      "executiveSummary": "This proposal outlines how our 'test cap' capability aligns with the 'test rfp' requirements.",
+      "sections": [
+        "Executive Summary",
+        "Capability Alignment",
+        "Risk Mitigation"
+      ],
+      "evidenceVerified": true,
+      "evidenceVerificationNotes": [
+        "Verification based strictly on provided capability brief."
+      ]
+    }
+  }
+}
