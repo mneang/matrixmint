@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { saveRun } from "@/lib/runStore";
 
 /**
  * /api/run
@@ -9,12 +10,15 @@ import { NextRequest, NextResponse } from "next/server";
  * Adds:
  *  - orchestrator metadata
  *  - runSummary proof fields (non-breaking)
- *  - stores the bundle in an in-memory run store (for /api/runs replay)
+ *  - stores the bundle in a disk+memory run store (for /api/runs replay)
  *
  * Reliability upgrade:
  *  - Avoid https://localhost internal fetch failures (common behind proxies)
  *  - Fallback to loopback http://127.0.0.1:<port> for internal calls when safe
  */
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type RunBody = {
   rfpText?: string;
@@ -80,17 +84,6 @@ function modeFromReq(req: NextRequest): "live" | "cache" | "offline" {
   return "live";
 }
 
-/**
- * Compute a safe internal origin for server-to-server calls.
- *
- * Problem: When the incoming request is seen as https://localhost:3000 (proxy),
- * req.nextUrl.origin becomes https://localhost:3000. But local Next dev/prod server
- * is often plain HTTP, so internal fetch to https://localhost fails with "fetch failed".
- *
- * Fix: If origin is https://localhost (or https://127.0.0.1 / 0.0.0.0), coerce to http.
- * Also: If internal fetch still fails, fallback to loopback http://127.0.0.1:<port>
- * when host looks local.
- */
 function getIncomingOrigin(req: NextRequest) {
   try {
     return req.nextUrl.origin;
@@ -104,7 +97,6 @@ function getHost(req: NextRequest) {
 }
 
 function getPortFromHost(host: string) {
-  // host could be "localhost:3000" or "127.0.0.1:3000"
   const m = host.match(/:(\d+)$/);
   return m?.[1] ? Number(m[1]) : null;
 }
@@ -124,11 +116,9 @@ function coerceHttpsLocalhostToHttp(origin: string) {
 }
 
 function resolveInternalOrigin(req: NextRequest) {
-  // Allow explicit override (useful for deployments / weird proxies)
   const env = process.env.MATRIXMINT_INTERNAL_ORIGIN?.trim();
   if (env) return env;
 
-  // Default to what Next thinks the origin is
   const incoming = getIncomingOrigin(req);
   return coerceHttpsLocalhostToHttp(incoming) || "http://127.0.0.1:3000";
 }
@@ -149,7 +139,14 @@ async function internalFetchJson(
   path: string,
   init?: RequestInit,
   timeoutMs?: number
-): Promise<{ res: Response | null; text: string; json: any; aborted?: boolean; timeoutMs?: number; urlTried: string[] }> {
+): Promise<{
+  res: Response | null;
+  text: string;
+  json: any;
+  aborted?: boolean;
+  timeoutMs?: number;
+  urlTried: string[];
+}> {
   const tried: string[] = [];
 
   const base1 = resolveInternalOrigin(req);
@@ -161,18 +158,16 @@ async function internalFetchJson(
     if (typeof timeoutMs === "number") {
       const out = await fetchJsonWithTimeout(url1, init || {}, timeoutMs);
       if (out.res) return { ...out, urlTried: tried };
-      // fallthrough if res is null (network error)
     } else {
       const out = await fetchJson(url1, init);
-      return { ...out, res: out.res, text: out.text, json: out.json, urlTried: tried };
+      return { ...out, urlTried: tried };
     }
   } catch (e: any) {
     const msg = String(e?.message ?? e);
-    // continue to fallback below
     if (!timeoutMs) return { res: null, text: msg, json: null, urlTried: tried };
   }
 
-  // 2) If local + proxy mismatch, try loopback http://127.0.0.1:<port>
+  // 2) Loopback fallback when host looks local
   if (shouldTryLoopbackFallback(req)) {
     const base2 = loopbackOrigin(req);
     const url2 = `${base2}${path}`;
@@ -192,37 +187,61 @@ async function internalFetchJson(
     }
   }
 
-  // If we got here, both attempts failed
   return { res: null, text: "fetch failed", json: null, urlTried: tried };
 }
 
-// ---- Run store (in-memory) ----
-type StoredRun = {
-  runId: string;
-  createdAtIso: string;
-  orchestrator: any;
-  runSummary: any;
-  exports: Record<string, string>;
-  result: any;
-  meta: any;
+/** ---------- Warning builder (judge-truth) ---------- */
+
+type AttemptForWarn = {
+  name: string;
+  ok: boolean;
+  httpStatus: number | null;
+  errorPreview?: string;
 };
 
-function getStore(): Map<string, StoredRun> {
-  const g = globalThis as any;
-  if (!g.__MATRIXMINT_RUNS) g.__MATRIXMINT_RUNS = new Map<string, StoredRun>();
-  return g.__MATRIXMINT_RUNS;
+function pickFirstFailure(attempts: AttemptForWarn[]) {
+  return attempts.find((a) => !a.ok) || null;
 }
 
-function storeRun(run: StoredRun) {
-  const store = getStore();
-  store.set(run.runId, run);
+function buildOrchestratorWarnings(args: {
+  modeRequested: "live" | "cache" | "offline";
+  ladderUsed: "live" | "cache" | "offline" | "none";
+  attempts: AttemptForWarn[];
+  analyzeWarnings: string[];
+}) {
+  const out: string[] = [];
 
-  // Cap memory: keep last ~25 runs (simple eviction)
-  if (store.size > 25) {
-    const keys = Array.from(store.keys());
-    const toDelete = keys.slice(0, store.size - 25);
-    for (const k of toDelete) store.delete(k);
+  // Always state intent (judges care about this)
+  out.push(`Mode requested: ${args.modeRequested.toUpperCase()}.`);
+
+  if (args.modeRequested === "live") {
+    if (args.ladderUsed === "live") {
+      out.push("Live execution succeeded.");
+    } else {
+      const fail = pickFirstFailure(args.attempts);
+      const reason =
+        fail && fail.httpStatus
+          ? `LIVE attempt failed (HTTP ${fail.httpStatus}${fail.errorPreview ? ` • ${fail.errorPreview}` : ""});`
+          : `LIVE attempt failed${fail?.errorPreview ? ` (${fail.errorPreview})` : ""};`;
+
+      out.push(`${reason} fell back to ${args.ladderUsed.toUpperCase()} replay for reliability.`);
+    }
+  } else if (args.modeRequested === "cache") {
+    out.push("Cache-preferred mode: replay for speed/stability.");
+  } else if (args.modeRequested === "offline") {
+    out.push("Offline-preferred mode: conservative fallback.");
   }
+
+  // Keep analyze warnings, but avoid misleading top-level messages when LIVE was requested
+  const filteredAnalyze = (args.analyzeWarnings || []).filter((w) => {
+    if (args.modeRequested === "live" && /cache-preferred mode/i.test(w)) return false;
+    return true;
+  });
+
+  for (const w of filteredAnalyze) out.push(w);
+
+  // De-dupe while preserving order
+  return Array.from(new Set(out));
 }
 
 export async function POST(req: NextRequest) {
@@ -232,7 +251,6 @@ export async function POST(req: NextRequest) {
   const incomingOrigin = getIncomingOrigin(req);
   const internalOrigin = resolveInternalOrigin(req);
 
-  // Attempt logs for judge trust
   const attempts: Array<{
     name: string;
     ok: boolean;
@@ -288,7 +306,10 @@ export async function POST(req: NextRequest) {
     }
 
     if (!rfpText || !capabilityText) {
-      return NextResponse.json({ ok: false, error: "Missing rfpText or capabilityText (or provide sampleId)" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "Missing rfpText or capabilityText (or provide sampleId)" },
+        { status: 400 }
+      );
     }
 
     // ---- Step 1: Analyze with lane logic ----
@@ -301,11 +322,9 @@ export async function POST(req: NextRequest) {
       h["x-matrixmint-mode"] = mode;
       if (bust) h["x-matrixmint-bust-cache"] = "1";
 
-      // Forward clear-cache if present
       const clear = req.headers.get("x-matrixmint-clear-cache");
       if (clear) h["x-matrixmint-clear-cache"] = clear;
 
-      // Forward demo-break-proof if present
       const demo = req.headers.get("x-matrixmint-demo-break-proof");
       if (demo) h["x-matrixmint-demo-break-proof"] = demo;
 
@@ -345,14 +364,33 @@ export async function POST(req: NextRequest) {
     } else if (reqMode === "cache") {
       analyzeRes = await tryAnalyze("cache_forced", "cache", false, CACHE_TIMEOUT_MS);
     } else {
+      // Prefer LIVE first
       const preferred = await tryAnalyze("preferred", "live", true, LIVE_TIMEOUT_MS);
       const preferredOk = Boolean(preferred.res?.ok && preferred.json?.ok);
 
       if (preferredOk) {
         analyzeRes = preferred;
       } else {
-        const fallback = await tryAnalyze("cache_fallback", "cache", false, CACHE_TIMEOUT_MS);
-        analyzeRes = fallback;
+        // Optional: short retry on quota/rate-limited (keeps demo stable while improving odds of live)
+        const status = preferred.res?.status ?? null;
+        const errPreview = String(preferred.json?.error || preferred.text || "");
+        const isQuota =
+          status === 429 || /quota/i.test(errPreview) || /rate/i.test(errPreview) || /resource_exhausted/i.test(errPreview);
+
+        if (isQuota) {
+          await new Promise((r) => setTimeout(r, 15_000));
+          const retry = await tryAnalyze("preferred_retry", "live", true, LIVE_TIMEOUT_MS);
+          const retryOk = Boolean(retry.res?.ok && retry.json?.ok);
+          if (retryOk) {
+            analyzeRes = retry;
+          } else {
+            const fallback = await tryAnalyze("cache_fallback", "cache", false, CACHE_TIMEOUT_MS);
+            analyzeRes = fallback;
+          }
+        } else {
+          const fallback = await tryAnalyze("cache_fallback", "cache", false, CACHE_TIMEOUT_MS);
+          analyzeRes = fallback;
+        }
       }
     }
 
@@ -424,6 +462,8 @@ export async function POST(req: NextRequest) {
 
     const payload = bundle.json ?? {};
 
+    const analyzeWarnings: string[] = Array.isArray(meta?.warnings) ? meta.warnings : [];
+
     payload.orchestrator = {
       runId,
       modeRequested: reqMode,
@@ -434,7 +474,17 @@ export async function POST(req: NextRequest) {
       ladderUsed,
       modelUsed: meta?.modelUsed ?? undefined,
       cache: meta?.cache ?? undefined,
-      warnings: meta?.warnings ?? [],
+      warnings: buildOrchestratorWarnings({
+        modeRequested: reqMode,
+        ladderUsed,
+        attempts: attempts.map((a) => ({
+          name: a.name,
+          ok: a.ok,
+          httpStatus: a.httpStatus,
+          errorPreview: a.errorPreview,
+        })),
+        analyzeWarnings,
+      }),
       attempts,
     };
 
@@ -445,19 +495,11 @@ export async function POST(req: NextRequest) {
     if (typeof sum.proofVerifiedCount === "number") payload.runSummary.proofVerifiedCount = sum.proofVerifiedCount;
     if (typeof sum.proofTotalEvidenceRefs === "number") payload.runSummary.proofTotalEvidenceRefs = sum.proofTotalEvidenceRefs;
 
-    // Store run for replay endpoints
+    // Persist exact bundle so /api/runs + /api/runs/[runId] work
     try {
-      storeRun({
-        runId,
-        createdAtIso: payload.orchestrator.startedAtIso,
-        orchestrator: payload.orchestrator,
-        runSummary: payload.runSummary,
-        exports: payload.exports || {},
-        result: payload.result || null,
-        meta: payload.meta || null,
-      });
+      await saveRun(runId, payload);
     } catch {
-      // no-op
+      // no-op (don’t break demo if disk write fails)
     }
 
     const json = JSON.stringify(payload, null, 2);
@@ -466,6 +508,7 @@ export async function POST(req: NextRequest) {
     const headersOut: Record<string, string> = {
       "Content-Type": "application/json; charset=utf-8",
       "x-matrixmint-run-id": runId,
+      "Cache-Control": "no-store",
     };
     if (download) {
       headersOut["Content-Disposition"] = `attachment; filename="matrixmint-run-${runId}.json"`;

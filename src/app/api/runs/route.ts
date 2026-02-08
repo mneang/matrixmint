@@ -1,29 +1,14 @@
 import { NextResponse } from "next/server";
+import { listRuns, runsDirectory } from "@/lib/runStore";
 
-type StoredRun = {
-  runId: string;
-  createdAtIso: string;
-  orchestrator: any;
-  runSummary: any;
-};
-
-function getStore(): Map<string, any> {
-  const g = globalThis as any;
-  if (!g.__MATRIXMINT_RUNS) g.__MATRIXMINT_RUNS = new Map<string, any>();
-  return g.__MATRIXMINT_RUNS;
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const store = getStore();
-  const runs = Array.from(store.values())
-    .map((r) => ({
-      runId: r.runId,
-      createdAtIso: r.createdAtIso,
-      orchestrator: r.orchestrator,
-      runSummary: r.runSummary,
-    }) as StoredRun)
-    .sort((a, b) => (a.createdAtIso < b.createdAtIso ? 1 : -1))
-    .slice(0, 25);
-
-  return NextResponse.json({ ok: true, runs });
+  const runs = await listRuns(50);
+  return NextResponse.json({
+    ok: true,
+    runs,
+    store: { dir: runsDirectory(), type: "disk+memory" },
+  });
 }

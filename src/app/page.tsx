@@ -1,357 +1,710 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 
-type CoverageStatus = "Covered" | "Partial" | "Missing";
+type RunMode = "live" | "cache" | "offline";
 
-type RequirementRow = {
-  id: string;
-  category: "Functional" | "NonFunctional";
-  text: string;
-  status: CoverageStatus;
-  responseSummary: string;
-  evidenceIds: string[];
-  evidenceQuotes: string[];
-  gapsOrQuestions: string[];
-  riskFlags: string[];
+type AttemptLog = {
+  name: string;
+  ok: boolean;
+  httpStatus: number | null;
+  elapsedMs: number;
+  aborted: boolean;
+  modelUsed?: string;
+  errorPreview?: string;
 };
 
-type MatrixResult = {
-  summary: {
-    totalRequirements: number;
-    coveredCount: number;
-    partialCount: number;
-    missingCount: number;
-    coveragePercent: number;
-    topRisks: string[];
-    nextActions: string[];
-
+type RunResponse = {
+  ok: boolean;
+  orchestrator?: {
+    runId?: string;
+    modeRequested?: RunMode;
+    modelRequested?: string;
+    ladderUsed?: "live" | "cache" | "offline" | "none";
+    modelUsed?: string;
+    elapsedMs?: number;
+    warnings?: string[];
+    attempts?: AttemptLog[];
+    cache?: { hit?: boolean; key?: string; source?: string; lane?: string; ageSeconds?: number };
+  };
+  runSummary?: {
+    coveragePercent?: number;
+    proof?: string;
+    total?: number;
+    covered?: number;
+    partial?: number;
+    missing?: number;
     proofPercent?: number;
     proofVerifiedCount?: number;
     proofTotalEvidenceRefs?: number;
-
-    proofNotes?: string[];
   };
-  requirements: RequirementRow[];
-  proposalOutline: {
-    executiveSummary: string;
-    sections: string[];
-  };
+  exports?: Record<string, string>;
+  data?: any;
+  error?: string;
+  details?: any;
+  meta?: any;
 };
 
-type AnalyzeMeta = {
-  modelRequested?: string;
-  modelUsed?: string;
-  fallbackUsed?: string;
-  warnings?: string[];
-  cache?: {
-    hit: boolean;
-    key?: string;
-    ageSeconds?: number;
-    source?: "memory" | "disk" | "none";
-  };
-  quota?: {
-    blocked: boolean;
-    blockedUntilUnixMs: number;
-    retryAfterSeconds?: number;
-    lastError: string;
-  };
+type HealthResult = {
+  ok: boolean;
+  steps: Array<{ name: string; ok: boolean; detail?: string }>;
+  hint?: string;
 };
 
-type SamplePayload = {
-  samples: Array<{
-    id: string;
-    name: string;
-    rfpText: string;
-    capabilityText: string;
-  }>;
-};
+type Stage =
+  | "idle"
+  | "preflight_running"
+  | "preflight_ok"
+  | "fast_running"
+  | "fast_ok"
+  | "live_running"
+  | "live_ok"
+  | "break_running"
+  | "break_ok"
+  | "done"
+  | "failed";
 
-function badgeStyle(status: CoverageStatus): React.CSSProperties {
+function fmtMs(ms?: number) {
+  if (typeof ms !== "number") return "—";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+}
+
+function round2(n?: number) {
+  if (typeof n !== "number") return "—";
+  return (Math.round(n * 100) / 100).toFixed(2);
+}
+
+function safeJsonParse(text: string) {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseFilenameFromContentDisposition(cd?: string | null) {
+  if (!cd) return null;
+  const m =
+    cd.match(/filename\*\s*=\s*UTF-8''([^;]+)/i) ||
+    cd.match(/filename\s*=\s*"([^"]+)"/i) ||
+    cd.match(/filename\s*=\s*([^;]+)/i);
+  const raw = m?.[1]?.trim();
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw.replace(/^"+|"+$/g, ""));
+  } catch {
+    return raw.replace(/^"+|"+$/g, "");
+  }
+}
+
+async function downloadBlob(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function isGeminiModelUsed(modelUsed?: string) {
+  return typeof modelUsed === "string" && modelUsed.startsWith("gemini-");
+}
+
+function badgeStyle(kind: "live" | "cache" | "offline" | "none") {
   const base: React.CSSProperties = {
     display: "inline-flex",
     alignItems: "center",
     gap: 8,
-    padding: "6px 10px",
+    padding: "8px 12px",
     borderRadius: 999,
-    fontSize: 12,
-    fontWeight: 800,
-    border: "1px solid rgba(0,0,0,0.12)",
+    fontWeight: 950,
+    fontSize: 13,
+    border: "1px solid rgba(0,0,0,0.14)",
+    background: "white",
     whiteSpace: "nowrap",
   };
-
-  if (status === "Covered") return { ...base, background: "rgba(16,185,129,0.15)" };
-  if (status === "Partial") return { ...base, background: "rgba(245,158,11,0.18)" };
-  return { ...base, background: "rgba(239,68,68,0.16)" };
+  if (kind === "live") return { ...base, border: "1px solid #111", background: "#111", color: "#fff" };
+  if (kind === "cache") return { ...base, border: "1px solid rgba(0,0,0,0.14)", background: "#fff", color: "#111" };
+  if (kind === "offline") return { ...base, border: "1px solid rgba(0,0,0,0.12)", background: "#fafafa", color: "#111" };
+  return base;
 }
 
-function smallPillStyle(): React.CSSProperties {
+function pillStyle(): React.CSSProperties {
   return {
     display: "inline-flex",
     alignItems: "center",
-    padding: "4px 8px",
+    padding: "8px 12px",
     borderRadius: 999,
-    fontSize: 12,
-    border: "1px solid rgba(0,0,0,0.12)",
-    marginRight: 8,
-    marginBottom: 8,
-    background: "rgba(255,255,255,0.6)",
-    fontWeight: 800,
+    fontSize: 13,
+    border: "1px solid rgba(0,0,0,0.14)",
+    background: "white",
+    fontWeight: 900,
+    whiteSpace: "nowrap",
   };
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+function bannerStyle(kind: "success" | "warn" | "error" | "info") {
+  const base: React.CSSProperties = {
+    borderRadius: 14,
+    padding: 14,
+    border: "1px solid rgba(0,0,0,0.14)",
+    background: "white",
+  };
+  if (kind === "success") return { ...base, border: "1px solid rgba(16,185,129,0.35)", background: "rgba(16,185,129,0.08)" };
+  if (kind === "warn") return { ...base, border: "1px solid rgba(245,158,11,0.35)", background: "rgba(245,158,11,0.10)" };
+  if (kind === "error") return { ...base, border: "1px solid rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.10)" };
+  return { ...base, border: "1px solid rgba(0,0,0,0.12)", background: "rgba(0,0,0,0.03)" };
 }
 
-type ExportFormat =
-  | "proofpack_md"
-  | "bidpacket_md"
-  | "clarifications_email_md"
-  | "risks_csv"
-  | "proposal_draft_md"
-  | "json";
-
-function exportFilename(format: ExportFormat) {
-  const d = new Date().toISOString().slice(0, 10);
-  if (format === "json") return `matrixmint-${d}.json`;
-  if (format === "risks_csv") return `matrixmint-risks-${d}.csv`;
-  if (format === "bidpacket_md") return `matrixmint-bid-ready-${d}.md`;
-  if (format === "clarifications_email_md") return `matrixmint-clarifications-email-${d}.md`;
-  if (format === "proposal_draft_md") return `matrixmint-proposal-draft-${d}.md`;
-  return `matrixmint-proofpack-${d}.md`;
+function StepDot({ state }: { state: "off" | "on" | "done" | "fail" }) {
+  const bg =
+    state === "done"
+      ? "#111"
+      : state === "fail"
+      ? "#b00020"
+      : state === "on"
+      ? "rgba(0,0,0,0.55)"
+      : "rgba(0,0,0,0.18)";
+  return <span style={{ width: 10, height: 10, borderRadius: 999, display: "inline-block", background: bg }} />;
 }
 
-type ForceMode = "auto" | "live" | "cache" | "offline";
+function extractHelpfulHint(parsed: any): string | null {
+  const incomingOrigin = parsed?.details?.incomingOrigin;
+  const internalOrigin = parsed?.details?.internalOrigin;
+  if (typeof incomingOrigin === "string" && incomingOrigin.startsWith("https://localhost")) {
+    return [
+      "Likely cause: request is coming from https://localhost, but internal fetch is expecting http.",
+      "Fix: set MATRIXMINT_INTERNAL_ORIGIN=http://127.0.0.1:3000 (or your port), and ensure /api/run uses it for internal fetches.",
+      "Quick workaround: open the app via http://127.0.0.1:3000 instead of https://localhost:3000.",
+      internalOrigin ? `Internal origin detected: ${internalOrigin}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  return null;
+}
 
-export default function Home() {
-  const matrixRef = useRef<HTMLDivElement | null>(null);
-
-  const [loadingSamples, setLoadingSamples] = useState(false);
-  const [samples, setSamples] = useState<SamplePayload["samples"]>([]);
-  const [selectedSampleId, setSelectedSampleId] = useState<string>("");
-
+export default function Page() {
+  // Inputs (default: sample)
   const [rfpText, setRfpText] = useState("");
   const [capabilityText, setCapabilityText] = useState("");
 
-  const [model, setModel] = useState<"gemini-3-flash-preview" | "gemini-3-pro-preview">("gemini-3-flash-preview");
-  const [forceMode, setForceMode] = useState<ForceMode>("auto");
+  // Model
+  const [model, setModel] = useState("gemini-3-flash-preview");
 
-  const [analyzing, setAnalyzing] = useState(false);
-  const [result, setResult] = useState<MatrixResult | null>(null);
-  const [meta, setMeta] = useState<AnalyzeMeta | null>(null);
-  const [error, setError] = useState<string>("");
+  // Toggles
+  const [includeBreakHeal, setIncludeBreakHeal] = useState(true);
+  const [autoDownloadPacketAfterLive, setAutoDownloadPacketAfterLive] = useState(true);
 
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"All" | CoverageStatus>("All");
-  const [categoryFilter, setCategoryFilter] = useState<"All" | "Functional" | "NonFunctional">("All");
+  // UI state
+  const [loading, setLoading] = useState(false);
+  const [resp, setResp] = useState<RunResponse | null>(null);
 
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("proofpack_md");
-  const [exporting, setExporting] = useState(false);
+  // Flow
+  const [stage, setStage] = useState<Stage>("idle");
+  const [flowError, setFlowError] = useState("");
 
-  // live countdown for quota retryAfter (UI)
-  const [quotaTick, setQuotaTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setQuotaTick((x) => x + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
+  // Preflight
+  const [health, setHealth] = useState<HealthResult | null>(null);
+  const [showHealth, setShowHealth] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoadingSamples(true);
-        const res = await fetch("/api/samples");
-        const json = (await res.json()) as SamplePayload;
-        const list = json.samples ?? [];
-        setSamples(list);
+  // Advanced
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
-        if (list.length) {
-          setSelectedSampleId(list[0].id);
-          setRfpText(list[0].rfpText);
-          setCapabilityText(list[0].capabilityText);
-        }
-      } catch (e: any) {
-        setError(e?.message ?? "Failed to load samples");
-      } finally {
-        setLoadingSamples(false);
-      }
-    })();
-  }, []);
+  // anchors for auto-scroll
+  const resultAnchorRef = useRef<HTMLDivElement | null>(null);
 
-  const selectedSample = useMemo(() => samples.find((s) => s.id === selectedSampleId) ?? null, [samples, selectedSampleId]);
+  const shouldUseSample = useMemo(() => !rfpText.trim() || !capabilityText.trim(), [rfpText, capabilityText]);
 
-  const filteredRequirements = useMemo(() => {
-    const rows = result?.requirements ?? [];
-    return rows.filter((r) => {
-      const q = query.trim().toLowerCase();
-      const matchesQuery =
-        !q ||
-        r.id.toLowerCase().includes(q) ||
-        r.text.toLowerCase().includes(q) ||
-        r.responseSummary.toLowerCase().includes(q) ||
-        (r.evidenceIds ?? []).some((x) => x.toLowerCase().includes(q)) ||
-        (r.riskFlags ?? []).some((x) => x.toLowerCase().includes(q));
+  const mkBody = useCallback(
+    (download?: boolean) => ({
+      rfpText: rfpText.trim() || undefined,
+      capabilityText: capabilityText.trim() || undefined,
+      sampleId: shouldUseSample ? "disaster-relief" : undefined,
+      model,
+      download: Boolean(download),
+    }),
+    [rfpText, capabilityText, shouldUseSample, model]
+  );
 
-      const matchesStatus = statusFilter === "All" ? true : r.status === statusFilter;
-      const matchesCategory = categoryFilter === "All" ? true : r.category === categoryFilter;
+  const orch = resp?.orchestrator;
+  const sum = resp?.runSummary;
 
-      return matchesQuery && matchesStatus && matchesCategory;
-    });
-  }, [result, query, statusFilter, categoryFilter]);
+  const ladder = (orch?.ladderUsed || "none") as "live" | "cache" | "offline" | "none";
+  const modelUsed = orch?.modelUsed ?? model;
+  const runId = orch?.runId || "run";
 
-  const coverage = useMemo(() => {
-    if (!result) return { pct: 0, covered: 0, partial: 0, missing: 0, total: 0, proof: null as null | string };
-    const s = result.summary;
-    const proof =
-      typeof s.proofPercent === "number" &&
-      typeof s.proofVerifiedCount === "number" &&
-      typeof s.proofTotalEvidenceRefs === "number"
-        ? `${Math.round(s.proofPercent)}% (${s.proofVerifiedCount}/${s.proofTotalEvidenceRefs})`
-        : null;
+  const liveConfirmed = ladder === "live" && isGeminiModelUsed(orch?.modelUsed);
 
-    return {
-      pct: clamp(s.coveragePercent, 0, 100),
-      covered: s.coveredCount,
-      partial: s.partialCount,
-      missing: s.missingCount,
-      total: s.totalRequirements,
-      proof,
+  const proofString = useMemo(() => {
+    if (!sum) return "—";
+    if (typeof sum.proofVerifiedCount === "number" && typeof sum.proofTotalEvidenceRefs === "number") {
+      const pct = typeof sum.proofPercent === "number" ? `${Math.round(sum.proofPercent)}%` : "—";
+      return `${pct} (${sum.proofVerifiedCount}/${sum.proofTotalEvidenceRefs})`;
+    }
+    return sum.proof || "—";
+  }, [sum]);
+
+  const coverageString = useMemo(() => {
+    if (typeof sum?.coveragePercent !== "number") return "—";
+    return `${round2(sum.coveragePercent)}%`;
+  }, [sum?.coveragePercent]);
+
+  const exportOrder = useMemo(
+    () => ["proofpack_md", "bidpacket_md", "proposal_draft_md", "clarifications_email_md", "risks_csv"],
+    []
+  );
+
+  const exportEntries = useMemo(() => {
+    const obj = resp?.exports || {};
+    const entries = Object.entries(obj);
+    const idx = (k: string) => {
+      const i = exportOrder.indexOf(k);
+      return i === -1 ? 999 : i;
     };
-  }, [result]);
+    entries.sort((a, b) => idx(a[0]) - idx(b[0]) || a[0].localeCompare(b[0]));
+    return entries;
+  }, [resp?.exports, exportOrder]);
 
-  const quotaInfo = useMemo(() => {
-    const q = meta?.quota;
-    if (!q) return { blocked: false, retryAfter: 0, lastError: "" };
-    let retryAfter = q.retryAfterSeconds ?? 0;
-
-    if (q.blocked && q.blockedUntilUnixMs) {
-      const ms = q.blockedUntilUnixMs - Date.now();
-      retryAfter = Math.max(0, Math.ceil(ms / 1000));
-    }
-
-    void quotaTick;
-    return { blocked: !!q.blocked, retryAfter, lastError: q.lastError ?? "" };
-  }, [meta, quotaTick]);
-
-  function scrollToMatrix() {
-    const el = matrixRef.current;
+  const scrollToResults = useCallback(() => {
+    const el = resultAnchorRef.current;
     if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
+    try {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch {
+      // ignore
+    }
+  }, []);
 
-  async function runAnalysis(opts?: { scroll?: boolean; bustCache?: boolean }) {
-    setError("");
-    setResult(null);
-    setMeta(null);
+  // ---------- Core runner ----------
+  const runWithHeaders = useCallback(
+    async (headers: Record<string, string>, label: string) => {
+      setLoading(true);
+      setFlowError("");
 
-    const rfp = rfpText.trim();
-    const cap = capabilityText.trim();
-    if (!rfp || !cap) {
-      setError("Both RFP text and Capability Brief are required.");
+      try {
+        const res = await fetch("/api/run", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(mkBody(false)),
+        });
+
+        const text = await res.text();
+        const parsed = safeJsonParse(text);
+
+        if (!res.ok) {
+          const hint = parsed ? extractHelpfulHint(parsed) : null;
+          const fail: RunResponse = {
+            ok: false,
+            error: "Request failed",
+            details: {
+              label,
+              status: res.status,
+              statusText: res.statusText || "",
+              requestBody: mkBody(false),
+              preview: text.slice(0, 1400),
+              parsed,
+              hint: hint || undefined,
+            },
+          };
+          setResp(fail);
+          return fail;
+        }
+
+        if (!parsed || typeof parsed.ok !== "boolean") {
+          const fail: RunResponse = {
+            ok: false,
+            error: `Unexpected response from ${label}.`,
+            details: { preview: text.slice(0, 1000) },
+          };
+          setResp(fail);
+          return fail;
+        }
+
+        setResp(parsed as RunResponse);
+        return parsed as RunResponse;
+      } catch (e: any) {
+        const fail: RunResponse = { ok: false, error: String(e?.message ?? e) };
+        setResp(fail);
+        return fail;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [mkBody]
+  );
+
+  // ---------- Packet download (single file) ----------
+  const downloadServerPacket = useCallback(
+    async (headers: Record<string, string>, fallbackName: string) => {
+      setLoading(true);
+      try {
+        const res = await fetch("/api/run", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(mkBody(true)),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          const parsed = safeJsonParse(text);
+          const fail: RunResponse = {
+            ok: false,
+            error: `Download failed (HTTP ${res.status})`,
+            details: { preview: text.slice(0, 1400), parsed },
+          };
+          setResp(fail);
+          return;
+        }
+
+        const cd = res.headers.get("content-disposition");
+        const filename = parseFilenameFromContentDisposition(cd) || fallbackName;
+
+        const blob = await res.blob();
+        await downloadBlob(filename, blob);
+      } catch (e: any) {
+        setResp({ ok: false, error: String(e?.message ?? e) });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [mkBody]
+  );
+
+  const downloadPacketLive = useCallback(async () => {
+    await downloadServerPacket(
+      {
+        "Content-Type": "application/json",
+        "x-matrixmint-mode": "live",
+        "x-matrixmint-bust-cache": "1",
+      },
+      `matrixmint-submission-packet-live-${Date.now()}.json`
+    );
+  }, [downloadServerPacket]);
+
+  const downloadPacketFast = useCallback(async () => {
+    await downloadServerPacket(
+      { "Content-Type": "application/json", "x-matrixmint-mode": "cache" },
+      `matrixmint-submission-packet-fast-${Date.now()}.json`
+    );
+  }, [downloadServerPacket]);
+
+  // ---------- Preflight ----------
+  const preflight = useCallback(async (): Promise<HealthResult> => {
+    const steps: HealthResult["steps"] = [];
+
+    try {
+      const s = await fetch("/api/samples");
+      const sText = await s.text();
+      if (!s.ok) {
+        steps.push({ name: "GET /api/samples", ok: false, detail: `HTTP ${s.status}: ${sText.slice(0, 220)}` });
+        return {
+          ok: false,
+          steps,
+          hint: "If /api/samples fails, routing/build is broken. Run: npm run build && npm run start.",
+        };
+      }
+      steps.push({ name: "GET /api/samples", ok: true, detail: "OK" });
+
+      const r = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-matrixmint-mode": "cache" },
+        body: JSON.stringify({ sampleId: "disaster-relief", model: model || "gemini-3-flash-preview", download: false }),
+      });
+
+      const rText = await r.text();
+      const parsed = safeJsonParse(rText);
+
+      if (!r.ok || !parsed?.ok) {
+        const hint = parsed ? extractHelpfulHint(parsed) : null;
+        steps.push({
+          name: "POST /api/run (FAST)",
+          ok: false,
+          detail: `HTTP ${r.status} • ${String(parsed?.error || rText || "failed").slice(0, 220)}`,
+        });
+        return {
+          ok: false,
+          steps,
+          hint: hint || "If curl works but browser fails, it’s likely origin/proxy mismatch (https localhost) or blocked downloads.",
+        };
+      }
+
+      const proof = parsed?.runSummary?.proof || "—";
+      const cov = parsed?.runSummary?.coveragePercent ?? "—";
+      steps.push({ name: "POST /api/run (FAST)", ok: true, detail: `OK • proof=${proof} • coverage=${cov}%` });
+
+      return { ok: true, steps, hint: "Backend OK." };
+    } catch (e: any) {
+      steps.push({ name: "Preflight", ok: false, detail: String(e?.message ?? e) });
+      return { ok: false, steps, hint: "Network/server error. Run prod build: npm run build && npm run start." };
+    }
+  }, [model]);
+
+  // ---------- Copy helper ----------
+  const copyText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard?.writeText(text);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const curlSnippet = useMemo(() => {
+    const baseLocal = "http://127.0.0.1:3000/api/run";
+    const body = JSON.stringify({ sampleId: "disaster-relief", model: model || "gemini-3-flash-preview", download: false });
+
+    const fast = `curl -s -X POST ${baseLocal} \\\n  -H "Content-Type: application/json" \\\n  -H "x-matrixmint-mode: cache" \\\n  -d '${body}' \\\n| jq '.ok,.orchestrator.ladderUsed,.orchestrator.modelUsed,.runSummary.proof,.runSummary.coveragePercent'`;
+
+    const live = `curl -s -X POST ${baseLocal} \\\n  -H "Content-Type: application/json" \\\n  -H "x-matrixmint-mode: live" \\\n  -H "x-matrixmint-bust-cache: 1" \\\n  -d '${body}' \\\n| jq '.ok,.orchestrator.ladderUsed,.orchestrator.modelUsed,.runSummary.proof,.runSummary.coveragePercent,.orchestrator.warnings'`;
+
+    return `# Local (recommended)\n${fast}\n\n${live}`;
+  }, [model]);
+
+  // ---------- One-click flow ----------
+  const runOneClickDemo = useCallback(async () => {
+    setFlowError("");
+    setShowHealth(false);
+    setHealth(null);
+
+    setStage("preflight_running");
+    const h = await preflight();
+    setHealth(h);
+
+    if (!h.ok) {
+      setStage("failed");
+      setShowHealth(true);
+      setFlowError("Preflight failed. Fix routing/origin first (hint below).");
+      scrollToResults();
       return;
     }
 
-    try {
-      setAnalyzing(true);
+    setStage("preflight_ok");
 
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (forceMode && forceMode !== "auto") headers["x-matrixmint-mode"] = forceMode;
-      if (opts?.bustCache) headers["x-matrixmint-bust-cache"] = "1";
+    // FAST
+    setStage("fast_running");
+    const r1 = await runWithHeaders({ "Content-Type": "application/json", "x-matrixmint-mode": "cache" }, "FAST");
+    if (!r1?.ok) {
+      setStage("failed");
+      setShowHealth(true);
+      setFlowError("FAST failed in browser. Preflight says backend OK → likely origin/proxy mismatch.");
+      scrollToResults();
+      return;
+    }
+    setStage("fast_ok");
 
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ rfpText: rfp, capabilityText: cap, model }),
-      });
+    // LIVE Proof
+    setStage("live_running");
+    const r2 = await runWithHeaders(
+      { "Content-Type": "application/json", "x-matrixmint-mode": "live", "x-matrixmint-bust-cache": "1" },
+      "LIVE_PROOF"
+    );
+    if (!r2?.ok) {
+      setStage("failed");
+      setShowHealth(true);
+      setFlowError("LIVE failed. Not fatal for a walkthrough — show FAST + preflight + curl proof.");
+      scrollToResults();
+      return;
+    }
+    setStage("live_ok");
 
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "Analyze failed");
+    // Break+Heal (optional)
+    if (includeBreakHeal) {
+      setStage("break_running");
+      const r3 = await runWithHeaders(
+        {
+          "Content-Type": "application/json",
+          "x-matrixmint-mode": "live",
+          "x-matrixmint-bust-cache": "1",
+          "x-matrixmint-demo-break-proof": "1",
+        },
+        "BREAK_HEAL"
+      );
 
-      setResult(json.data as MatrixResult);
-      setMeta(json.meta as AnalyzeMeta);
-
-      if (opts?.scroll) {
-        setTimeout(() => scrollToMatrix(), 50);
-      }
-    } catch (e: any) {
-      const msg = String(e?.message ?? "Analyze failed");
-      if (msg.toLowerCase().includes("overloaded") || msg.includes("503") || msg.includes("UNAVAILABLE")) {
-        setError("Gemini is temporarily overloaded (503). Click Run Analysis again in a few seconds.");
+      if (!r3?.ok) {
+        setStage("live_ok");
+        setFlowError("Break+Heal failed (optional). LIVE proof still stands.");
       } else {
-        setError(msg);
+        setStage("break_ok");
       }
-    } finally {
-      setAnalyzing(false);
     }
-  }
 
-  function loadSampleToEditors() {
-    if (!selectedSample) return;
-    setRfpText(selectedSample.rfpText);
-    setCapabilityText(selectedSample.capabilityText);
-    setResult(null);
-    setMeta(null);
-    setError("");
-  }
-
-  async function downloadExport(format: ExportFormat) {
-    if (!result) {
-      setError("Run analysis first, then export.");
-      return;
+    // Auto-download packet after LIVE
+    if (autoDownloadPacketAfterLive) {
+      await downloadServerPacket(
+        { "Content-Type": "application/json", "x-matrixmint-mode": "live", "x-matrixmint-bust-cache": "1" },
+        `matrixmint-submission-packet-live-${Date.now()}.json`
+      );
     }
+
+    setStage("done");
+    scrollToResults();
+  }, [
+    autoDownloadPacketAfterLive,
+    downloadServerPacket,
+    includeBreakHeal,
+    preflight,
+    runWithHeaders,
+    scrollToResults,
+  ]);
+
+  const runPreflightOnly = useCallback(async () => {
+    setFlowError("");
+    setLoading(true);
     try {
-      setExporting(true);
-      const res = await fetch(`/api/export?format=${encodeURIComponent(format)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ result }),
-      });
-
-      if (!res.ok) {
-        const j = await res.json().catch(() => null);
-        throw new Error(j?.error ?? `Export failed (${res.status})`);
-      }
-
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = exportFilename(format);
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e: any) {
-      setError(String(e?.message ?? "Export failed"));
+      const h = await preflight();
+      setHealth(h);
+      setShowHealth(true);
+      if (!h.ok) setFlowError("Preflight failed. See hint below.");
+      else setFlowError("");
     } finally {
-      setExporting(false);
+      setLoading(false);
     }
-  }
+  }, [preflight]);
 
-  async function demoMode() {
-    if (selectedSample) loadSampleToEditors();
-    await runAnalysis({ scroll: true });
-  }
+  // Step dots
+  const stepStates = useMemo(() => {
+    const s = stage;
+    const preflight =
+      s === "preflight_ok" ||
+      s === "fast_running" ||
+      s === "fast_ok" ||
+      s === "live_running" ||
+      s === "live_ok" ||
+      s === "break_running" ||
+      s === "break_ok" ||
+      s === "done"
+        ? "done"
+        : s === "preflight_running"
+        ? "on"
+        : s === "failed"
+        ? "fail"
+        : "off";
 
-  const headerStyle: React.CSSProperties = { maxWidth: 1120, margin: "0 auto", padding: "28px 20px 10px 20px" };
-  const containerStyle: React.CSSProperties = { maxWidth: 1120, margin: "0 auto", padding: "0 20px 80px 20px" };
+    const fast =
+      s === "fast_ok" || s === "live_running" || s === "live_ok" || s === "break_running" || s === "break_ok" || s === "done"
+        ? "done"
+        : s === "fast_running"
+        ? "on"
+        : s === "failed" && flowError.includes("FAST")
+        ? "fail"
+        : "off";
+
+    const live =
+      s === "live_ok" || s === "break_running" || s === "break_ok" || s === "done"
+        ? "done"
+        : s === "live_running"
+        ? "on"
+        : s === "failed" && flowError.includes("LIVE")
+        ? "fail"
+        : "off";
+
+    const breakHeal =
+      !includeBreakHeal
+        ? "off"
+        : s === "break_ok" || s === "done"
+        ? "done"
+        : s === "break_running"
+        ? "on"
+        : s === "failed" && flowError.toLowerCase().includes("break")
+        ? "fail"
+        : "off";
+
+    return { preflight, fast, live, breakHeal };
+  }, [stage, flowError, includeBreakHeal]);
+
+  // Banner
+  const topBanner = useMemo(() => {
+    if (!resp) return null;
+    if (!resp.ok) {
+      return { kind: "error" as const, title: "Run failed", body: resp.error || "Unknown error." };
+    }
+    if (liveConfirmed) {
+      return {
+        kind: "success" as const,
+        title: "Live proof verified",
+        body: `Lane: LIVE • Model: ${orch?.modelUsed} • Elapsed: ${fmtMs(orch?.elapsedMs)}`,
+      };
+    }
+    if (orch?.ladderUsed && orch.ladderUsed !== "none") {
+      return {
+        kind: "info" as const,
+        title: "Run complete",
+        body: `Lane: ${orch.ladderUsed.toUpperCase()} • Model: ${orch.modelUsed ?? "—"} • Elapsed: ${fmtMs(orch.elapsedMs)}`,
+      };
+    }
+    return null;
+  }, [resp, liveConfirmed, orch?.elapsedMs, orch?.ladderUsed, orch?.modelUsed]);
+
+  // proof repair info (optional server meta)
+  const proofRepairInfo = useMemo(() => {
+    const pr =
+      (resp as any)?.meta?.proofRepair ||
+      (resp as any)?.orchestrator?.proofRepair ||
+      (resp as any)?.data?.meta?.proofRepair ||
+      null;
+    return pr;
+  }, [resp]);
+
+  // Styles
+  const page: React.CSSProperties = {
+    maxWidth: 1120,
+    margin: "0 auto",
+    padding: "26px 20px 70px 20px",
+  };
 
   const card: React.CSSProperties = {
     border: "1px solid rgba(0,0,0,0.12)",
-    borderRadius: 16,
+    borderRadius: 18,
     padding: 16,
-    background: "rgba(255,255,255,0.7)",
-    boxShadow: "0 6px 20px rgba(0,0,0,0.06)",
+    background: "rgba(255,255,255,0.75)",
+    boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
   };
 
-  const grid2: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 };
-  const grid3: React.CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 };
+  const h1: React.CSSProperties = { fontSize: 44, fontWeight: 980, letterSpacing: -0.6, margin: 0 };
+  const subtitle: React.CSSProperties = { marginTop: 10, marginBottom: 0, opacity: 0.9, fontSize: 16, lineHeight: 1.45 };
 
-  const label: React.CSSProperties = { fontSize: 12, fontWeight: 800, opacity: 0.8, marginBottom: 6 };
+  const primaryBtn: React.CSSProperties = {
+    padding: "12px 18px",
+    borderRadius: 14,
+    border: "1px solid #111",
+    background: "#111",
+    color: "white",
+    fontWeight: 950,
+    cursor: "pointer",
+    minWidth: 220,
+  };
+
+  const secondaryBtn: React.CSSProperties = {
+    padding: "12px 18px",
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,0.18)",
+    background: "white",
+    color: "#111",
+    fontWeight: 950,
+    cursor: "pointer",
+    minWidth: 220,
+  };
+
+  const ghostBtn: React.CSSProperties = {
+    padding: "12px 18px",
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,0.18)",
+    background: "rgba(255,255,255,0.75)",
+    color: "#111",
+    fontWeight: 950,
+    cursor: "pointer",
+  };
+
+  const label: React.CSSProperties = { fontSize: 12, fontWeight: 950, opacity: 0.8, marginBottom: 8 };
 
   const textarea: React.CSSProperties = {
     width: "100%",
-    minHeight: 220,
+    minHeight: 180,
     padding: 12,
-    borderRadius: 12,
+    borderRadius: 14,
     border: "1px solid rgba(0,0,0,0.18)",
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontSize: 12,
@@ -360,421 +713,388 @@ export default function Home() {
     background: "white",
   };
 
-  const button: React.CSSProperties = {
-    padding: "10px 14px",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.14)",
-    background: "black",
-    color: "white",
-    fontWeight: 900,
-    cursor: "pointer",
-  };
-
-  const buttonSecondary: React.CSSProperties = {
-    padding: "10px 14px",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.14)",
-    background: "white",
-    color: "black",
-    fontWeight: 900,
-    cursor: "pointer",
-  };
-
-  const selectStyle: React.CSSProperties = {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(0,0,0,0.14)",
-    fontWeight: 900,
-  };
-
-  const metaRow = meta ? (
-    <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-      <span style={smallPillStyle()}>
-        Requested: <b style={{ marginLeft: 6 }}>{meta.modelRequested ?? "—"}</b>
-      </span>
-      <span style={smallPillStyle()}>
-        Used: <b style={{ marginLeft: 6 }}>{meta.modelUsed ?? "—"}</b>
-      </span>
-      <span style={smallPillStyle()}>
-        Cache: <b style={{ marginLeft: 6 }}>{meta.cache?.hit ? `hit (${meta.cache.source ?? "?"})` : "miss"}</b>
-        {typeof meta.cache?.ageSeconds === "number" ? (
-          <span style={{ marginLeft: 6, opacity: 0.8 }}>age={meta.cache.ageSeconds}s</span>
-        ) : null}
-      </span>
-      {quotaInfo.blocked ? (
-        <span style={{ ...smallPillStyle(), borderColor: "rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.06)" }}>
-          Quota cooldown: <b style={{ marginLeft: 6 }}>{quotaInfo.retryAfter}s</b>
-        </span>
-      ) : (
-        <span style={{ ...smallPillStyle(), borderColor: "rgba(16,185,129,0.35)", background: "rgba(16,185,129,0.06)" }}>
-          Quota: <b style={{ marginLeft: 6 }}>OK</b>
-        </span>
-      )}
-    </div>
-  ) : null;
+  const busy =
+    loading ||
+    stage === "preflight_running" ||
+    stage === "fast_running" ||
+    stage === "live_running" ||
+    stage === "break_running";
 
   return (
-    <div style={{ background: "linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0.00))", minHeight: "100vh" }}>
-      <header style={headerStyle}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-          <div>
-            <h1 style={{ fontSize: 34, fontWeight: 950, letterSpacing: -0.5, margin: 0 }}>MatrixMint</h1>
-            <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.9 }}>
-              Proof-locked RFP compliance matrix + bid-ready exports. <span style={{ fontWeight: 900 }}>No invented capabilities.</span>
-            </p>
+    <div style={{ background: "linear-gradient(180deg, rgba(0,0,0,0.04), rgba(0,0,0,0))", minHeight: "100vh" }}>
+      <div style={page}>
+        <div>
+          <h1 style={h1}>MatrixMint — Submission Mode</h1>
+          <p style={subtitle}>
+            Analyze → evidence-locked matrix → proof verification → bid-ready exports. <span style={{ fontWeight: 950 }}>No invented capabilities.</span>
+          </p>
+        </div>
+
+        {/* Scoreboard */}
+        <div style={{ marginTop: 18, ...card }}>
+          <div style={{ fontWeight: 980, fontSize: 18, marginBottom: 8 }}>Run Summary</div>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 12 }}>Lane • model • coverage • proof • exports • runId</div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={badgeStyle(ladder)}>Lane: {ladder.toUpperCase()}</span>
+            <span style={pillStyle()}>Model: {orch?.modelUsed ?? modelUsed}</span>
+            <span style={pillStyle()}>Coverage: {coverageString}</span>
+            <span style={pillStyle()}>Proof: {proofString}</span>
+            <span style={pillStyle()}>Exports: {exportEntries.length ? `${exportEntries.length} ready` : "—"}</span>
+
+            <div style={{ flex: 1 }} />
+
+            <button onClick={() => copyText(runId)} style={ghostBtn} title="Copy runId">
+              Copy runId
+            </button>
+            <button onClick={() => copyText(curlSnippet)} style={ghostBtn} title="Copy reproducible curl commands">
+              Copy curl
+            </button>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <a
-              href="/demo"
-              style={{
-                padding: "10px 14px",
-                borderRadius: 12,
-                border: "1px solid rgba(0,0,0,0.14)",
-                background: "white",
-                color: "black",
-                fontWeight: 950,
-                cursor: "pointer",
-                textDecoration: "none",
-              }}
-              title="Judge-focused demo: FAST → exports → LIVE proof → optional Break+Heal"
-            >
-              Judge Demo →
-            </a>
-
-            <select value={forceMode} onChange={(e) => setForceMode(e.target.value as ForceMode)} style={selectStyle} title="Execution mode">
-              <option value="auto">Mode: Auto</option>
-              <option value="live">Mode: Live</option>
-              <option value="cache">Mode: Cache-only</option>
-              <option value="offline">Mode: Offline</option>
-            </select>
-
-            <select value={model} onChange={(e) => setModel(e.target.value as any)} style={selectStyle} title="Model">
-              <option value="gemini-3-flash-preview">Gemini 3 Flash (fast)</option>
-              <option value="gemini-3-pro-preview">Gemini 3 Pro (best)</option>
-            </select>
-
-            <button style={buttonSecondary} onClick={loadSampleToEditors} disabled={loadingSamples || !selectedSample}>
-              Load Sample
-            </button>
-
-            <button style={buttonSecondary} onClick={demoMode} disabled={loadingSamples || analyzing || !selectedSample}>
-              Demo Mode
-            </button>
-
-            <button style={button} onClick={() => runAnalysis({ scroll: true })} disabled={analyzing}>
-              {analyzing ? "Analyzing..." : "Run Analysis"}
-            </button>
-
-            <button
-              style={buttonSecondary}
-              onClick={() => runAnalysis({ scroll: true, bustCache: true })}
-              disabled={analyzing}
-              title="Bypass cache for this run"
-            >
-              {analyzing ? "…" : "Run (Bust Cache)"}
-            </button>
-
-            <select
-              value={exportFormat}
-              onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
-              style={selectStyle}
-              disabled={!result}
-              title="Export format"
-            >
-              <option value="proofpack_md">Proof Pack (MD)</option>
-              <option value="bidpacket_md">Bid-Ready Packet (MD)</option>
-              <option value="clarifications_email_md">Clarifications Email (MD)</option>
-              <option value="proposal_draft_md">Proposal Draft (MD)</option>
-              <option value="risks_csv">Risks (CSV)</option>
-              <option value="json">JSON</option>
-            </select>
-
-            <button style={buttonSecondary} onClick={() => downloadExport(exportFormat)} disabled={!result || exporting}>
-              {exporting ? "Exporting..." : "Download"}
-            </button>
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.78 }}>
+            {liveConfirmed ? "✅ Live proof verified." : resp?.ok ? "Run LIVE Proof to verify fresh Gemini execution." : "Run the one-click flow to generate a proof-locked result."}
           </div>
         </div>
 
-        <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ ...label, marginBottom: 0 }}>Sample:</span>
-          <select
-            value={selectedSampleId}
-            onChange={(e) => setSelectedSampleId(e.target.value)}
-            style={{ ...selectStyle, minWidth: 320, fontWeight: 800 }}
-          >
-            {samples.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+        {/* One-click narrative */}
+        <div style={{ marginTop: 14, ...card }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+            <div>
+              <div style={{ fontWeight: 980, fontSize: 20, marginBottom: 8 }}>One-Click Demo</div>
+              <div style={{ fontSize: 14, opacity: 0.85, lineHeight: 1.5 }}>
+                Runs: <b>Preflight</b> → <b>FAST</b> → <b>LIVE Proof</b> → optional <b>Break+Heal</b>.
+                <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>
+                  Download <b>Submission Packet (1 file)</b> for a judge-friendly artifact (contains all exports + run receipt).
+                </div>
+              </div>
+            </div>
 
-          <span style={{ fontSize: 12, opacity: 0.8 }}>
-            Flash for iteration. Pro for final demo. Auto protects under quota.
-          </span>
-        </div>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                onClick={runOneClickDemo}
+                disabled={busy}
+                style={{
+                  ...primaryBtn,
+                  background: busy ? "rgba(0,0,0,0.55)" : "#111",
+                  borderColor: "#111",
+                  cursor: busy ? "not-allowed" : "pointer",
+                }}
+                title="Runs the full narrative with preflight first."
+              >
+                {busy
+                  ? stage === "live_running"
+                    ? "Running LIVE…"
+                    : stage === "fast_running"
+                    ? "Running FAST…"
+                    : stage === "preflight_running"
+                    ? "Preflight…"
+                    : "Running…"
+                  : "Run One-Click Demo"}
+              </button>
 
-        {metaRow}
-
-        {meta?.warnings?.length ? (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-            <div style={{ fontWeight: 950, marginBottom: 4 }}>Warnings</div>
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              {meta.warnings.slice(0, 6).map((w, i) => (
-                <li key={i} style={{ marginBottom: 4 }}>
-                  {w}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        {error ? (
-          <div
-            style={{
-              marginTop: 14,
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid rgba(239,68,68,0.3)",
-              background: "rgba(239,68,68,0.08)",
-            }}
-          >
-            <div style={{ fontWeight: 950 }}>Error</div>
-            <div style={{ marginTop: 6, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: 12 }}>
-              {error}
+              <button onClick={downloadPacketLive} disabled={busy} style={secondaryBtn} title="Downloads ONE packet (live lane).">
+                Download Packet (LIVE)
+              </button>
             </div>
           </div>
-        ) : null}
-      </header>
 
-      <main style={containerStyle}>
-        <section style={grid2}>
-          <div style={card}>
-            <div style={label}>RFP (paste or load a sample)</div>
-            <textarea style={textarea} value={rfpText} onChange={(e) => setRfpText(e.target.value)} />
+          <div style={{ marginTop: 10, display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 900 }}>
+              <input type="checkbox" checked={includeBreakHeal} onChange={(e) => setIncludeBreakHeal(Boolean(e.target.checked))} />
+              Include Break+Heal
+            </label>
+
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 900 }}>
+              <input
+                type="checkbox"
+                checked={autoDownloadPacketAfterLive}
+                onChange={(e) => setAutoDownloadPacketAfterLive(Boolean(e.target.checked))}
+              />
+              Auto-download packet after LIVE
+            </label>
+
+            <div style={{ flex: 1 }} />
+
+            <button onClick={downloadPacketFast} disabled={busy} style={secondaryBtn} title="Downloads ONE packet (fast lane).">
+              Download Packet (FAST)
+            </button>
           </div>
 
-          <div style={card}>
-            <div style={label}>Capability Brief (evidence only)</div>
-            <textarea style={textarea} value={capabilityText} onChange={(e) => setCapabilityText(e.target.value)} />
+          {/* Step dots */}
+          <div style={{ marginTop: 14, display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center" }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              <StepDot state={stepStates.preflight as any} />
+              <span style={{ fontWeight: 950, opacity: stepStates.preflight === "off" ? 0.6 : 0.95 }}>Preflight</span>
+            </div>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              <StepDot state={stepStates.fast as any} />
+              <span style={{ fontWeight: 950, opacity: stepStates.fast === "off" ? 0.6 : 0.95 }}>FAST</span>
+            </div>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              <StepDot state={stepStates.live as any} />
+              <span style={{ fontWeight: 950, opacity: stepStates.live === "off" ? 0.6 : 0.95 }}>LIVE Proof</span>
+            </div>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              <StepDot state={stepStates.breakHeal as any} />
+              <span style={{ fontWeight: 950, opacity: includeBreakHeal ? 0.95 : 0.45 }}>Break+Heal</span>
+            </div>
+
+            {stage === "failed" && flowError ? <span style={{ fontWeight: 950, color: "#b00020" }}>{flowError}</span> : null}
           </div>
-        </section>
 
-        {result ? (
-          <>
-            <section style={{ marginTop: 16, ...grid3 }}>
-              <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Coverage</div>
-                <div style={{ marginTop: 6, fontSize: 34, fontWeight: 950 }}>{coverage.pct.toFixed(0)}%</div>
-
-                <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <span style={smallPillStyle()}>Covered: {coverage.covered}</span>
-                  <span style={smallPillStyle()}>Partial: {coverage.partial}</span>
-                  <span style={smallPillStyle()}>Missing: {coverage.missing}</span>
-                  <span style={smallPillStyle()}>Total: {coverage.total}</span>
-                  {coverage.proof ? <span style={smallPillStyle()}>Proof: {coverage.proof}</span> : null}
-                </div>
-
-                <div style={{ marginTop: 10, height: 10, borderRadius: 999, background: "rgba(0,0,0,0.08)", overflow: "hidden" }}>
-                  <div style={{ width: `${coverage.pct}%`, height: "100%", background: "black" }} />
-                </div>
-
-                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
-                  Coverage is conservative by design. Proof is the credibility layer.
-                </div>
-              </div>
-
-              <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Top Risks</div>
-                <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
-                  {result.summary.topRisks?.slice(0, 8).map((r, i) => (
-                    <li key={i} style={{ marginBottom: 8, fontSize: 13 }}>
-                      {r}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Next Actions</div>
-                <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
-                  {result.summary.nextActions?.slice(0, 8).map((a, i) => (
-                    <li key={i} style={{ marginBottom: 8, fontSize: 13 }}>
-                      {a}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </section>
-
-            <section ref={matrixRef} style={{ marginTop: 16, ...card }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 950 }}>Compliance Matrix</div>
-                  <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
-                    Filter by status/category and search by ID, text, evidence, or risks.
+          {/* Preflight panel */}
+          {(showHealth || stage === "failed" || stage === "preflight_running") && health ? (
+            <div style={{ marginTop: 14, ...bannerStyle(health.ok ? "success" : "warn") }}>
+              <div style={{ fontWeight: 980, fontSize: 16, marginBottom: 8 }}>{health.ok ? "Preflight: OK" : "Preflight: Issue detected"}</div>
+              <div style={{ display: "grid", gap: 6, fontSize: 13, opacity: 0.92 }}>
+                {health.steps.map((s, idx) => (
+                  <div key={idx}>
+                    <b>{s.ok ? "✅" : "❌"} {s.name}:</b> <span style={{ opacity: 0.85 }}>{s.detail || "—"}</span>
                   </div>
+                ))}
+              </div>
+              {health.hint ? (
+                <div style={{ marginTop: 10, fontSize: 13, opacity: 0.9 }}>
+                  <b>Hint:</b> {health.hint}
                 </div>
+              ) : null}
 
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search (e.g., FR-05, SMS, CB-14)"
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(0,0,0,0.14)",
-                      minWidth: 260,
-                    }}
-                  />
-                  <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)} style={selectStyle}>
-                    <option value="All">All Status</option>
-                    <option value="Covered">Covered</option>
-                    <option value="Partial">Partial</option>
-                    <option value="Missing">Missing</option>
-                  </select>
-
-                  <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value as any)} style={selectStyle}>
-                    <option value="All">All Categories</option>
-                    <option value="Functional">Functional</option>
-                    <option value="NonFunctional">Non-Functional</option>
-                  </select>
-                </div>
+              <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button onClick={runPreflightOnly} disabled={busy} style={secondaryBtn}>
+                  Run Preflight only
+                </button>
+                <button onClick={() => setShowHealth((v) => !v)} disabled={busy} style={ghostBtn}>
+                  {showHealth ? "Hide" : "Show"} Preflight panel
+                </button>
               </div>
-
-              <div style={{ marginTop: 14, overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0 }}>
-                  <thead>
-                    <tr>
-                      {["ID", "Category", "Requirement", "Status", "Evidence", "Gaps / Questions", "Risks"].map((h) => (
-                        <th
-                          key={h}
-                          style={{
-                            textAlign: "left",
-                            fontSize: 12,
-                            fontWeight: 950,
-                            padding: "10px 10px",
-                            borderBottom: "1px solid rgba(0,0,0,0.14)",
-                            background: "rgba(0,0,0,0.03)",
-                            position: "sticky",
-                            top: 0,
-                          }}
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredRequirements.map((r) => (
-                      <tr key={r.id}>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontWeight: 950, fontSize: 12, whiteSpace: "nowrap" }}>
-                          {r.id}
-                        </td>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)", fontSize: 12, whiteSpace: "nowrap" }}>
-                          {r.category}
-                        </td>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
-                          <div style={{ fontSize: 13, fontWeight: 900 }}>{r.text}</div>
-                          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>{r.responseSummary}</div>
-                        </td>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
-                          <span style={badgeStyle(r.status)}>{r.status}</span>
-                        </td>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
-                          {r.evidenceIds?.length ? (
-                            <>
-                              <div style={{ fontWeight: 950, fontSize: 12 }}>{r.evidenceIds.join(", ")}</div>
-                              {r.evidenceQuotes?.slice(0, 2).map((q, i) => (
-                                <div key={i} style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-                                  “{q}”
-                                </div>
-                              ))}
-                            </>
-                          ) : (
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>—</div>
-                          )}
-                        </td>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
-                          {r.gapsOrQuestions?.length ? (
-                            <ul style={{ margin: 0, paddingLeft: 18 }}>
-                              {r.gapsOrQuestions.slice(0, 3).map((g, i) => (
-                                <li key={i} style={{ fontSize: 12, marginBottom: 6 }}>
-                                  {g}
-                                </li>
-                              ))}
-                            </ul>
-                          ) : (
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>—</div>
-                          )}
-                        </td>
-                        <td style={{ padding: 10, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
-                          {r.riskFlags?.length ? (
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                              {r.riskFlags.slice(0, 6).map((x, i) => (
-                                <span key={i} style={smallPillStyle()}>
-                                  {x}
-                                </span>
-                              ))}
-                            </div>
-                          ) : (
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>—</div>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
-                  Showing {filteredRequirements.length} / {result.requirements.length} requirements.
-                </div>
-              </div>
-            </section>
-
-            <section style={{ marginTop: 16, ...grid2 }}>
-              <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Proposal: Executive Summary</div>
-                <div style={{ marginTop: 10, fontSize: 13, lineHeight: 1.6 }}>{result.proposalOutline.executiveSummary}</div>
-              </div>
-
-              <div style={card}>
-                <div style={{ fontSize: 12, fontWeight: 950, opacity: 0.8 }}>Proposal: Sections</div>
-                <ol style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
-                  {result.proposalOutline.sections.map((s, i) => (
-                    <li key={i} style={{ marginBottom: 8, fontSize: 13 }}>
-                      {s}
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            </section>
-          </>
-        ) : (
-          <section style={{ marginTop: 16, ...card }}>
-            <div style={{ fontSize: 16, fontWeight: 950 }}>How to use</div>
-            <ol style={{ marginTop: 10, paddingLeft: 18, lineHeight: 1.7 }}>
-              <li>
-                Click <b>Load Sample</b> (or paste your own RFP + Capability Brief).
-              </li>
-              <li>
-                Click <b>Run Analysis</b> to generate the compliance matrix with evidence.
-              </li>
-              <li>
-                Use <b>Download</b> to export a Proof Pack, Bid-Ready Packet, or Clarifications Email.
-              </li>
-              <li>
-                For judge flow, click <b>Judge Demo →</b> and follow FAST → exports → LIVE proof → Break+Heal.
-              </li>
-            </ol>
-            <div style={{ marginTop: 12, fontSize: 12, opacity: 0.85 }}>
-              This is not a chatbot wrapper. It is a proof-locked compliance + export system with verifier-driven integrity.
             </div>
-          </section>
-        )}
-      </main>
+          ) : (
+            <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button onClick={runPreflightOnly} disabled={busy} style={secondaryBtn}>
+                Run Preflight only
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Results banner anchor */}
+        <div ref={resultAnchorRef} style={{ height: 1 }} />
+
+        {/* Result banner */}
+        {topBanner ? (
+          <div style={{ marginTop: 14, ...bannerStyle(topBanner.kind) }}>
+            <div style={{ fontWeight: 980, fontSize: 16, marginBottom: 6 }}>{topBanner.title}</div>
+            <div style={{ opacity: 0.92 }}>{topBanner.body}</div>
+
+            {proofRepairInfo?.triggered ? (
+              <div style={{ marginTop: 10, fontSize: 13, opacity: 0.92 }}>
+                <b>Break+Heal signal:</b>{" "}
+                {`fixed=${proofRepairInfo.fixedMismatches ?? "—"} • passes=${proofRepairInfo.attempts ?? "—"} • ${proofRepairInfo.beforeProofPercent ?? "—"}% → ${proofRepairInfo.afterProofPercent ?? "—"}%`}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Run summary + exports */}
+        <div style={{ marginTop: 14, ...card }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ minWidth: 360, flex: 1 }}>
+              <div style={{ fontWeight: 980, fontSize: 18, marginBottom: 10 }}>Details</div>
+
+              {resp ? (
+                <div style={{ display: "grid", gap: 8, fontSize: 14, opacity: 0.95 }}>
+                  <div><b>Status:</b> {resp.ok ? "OK" : "FAIL"}</div>
+                  <div><b>Lane:</b> {ladder.toUpperCase()}</div>
+                  <div>
+                    <b>Model used:</b> {orch?.modelUsed ?? "—"}{" "}
+                    {resp.ok && liveConfirmed ? <span style={{ marginLeft: 8, fontWeight: 950 }}>✅ LIVE proof OK</span> : null}
+                  </div>
+                  <div><b>Elapsed:</b> {fmtMs(orch?.elapsedMs)} <span style={{ opacity: 0.75 }}>(runId: {runId})</span></div>
+                  <div><b>Coverage:</b> {coverageString}</div>
+                  <div><b>Proof:</b> {proofString}</div>
+                  <div><b>Counts:</b> total {sum?.total ?? "—"} / covered {sum?.covered ?? "—"} / partial {sum?.partial ?? "—"} / missing {sum?.missing ?? "—"}</div>
+                  {orch?.warnings?.length ? <div><b>Warnings:</b> {orch.warnings.slice(0, 3).join(" | ")}</div> : null}
+                </div>
+              ) : (
+                <div style={{ opacity: 0.7 }}>Run the one-click demo to populate results.</div>
+              )}
+
+              {!resp?.ok && resp?.details ? (
+                <pre style={{ marginTop: 14, background: "rgba(0,0,0,0.04)", padding: 12, borderRadius: 14, overflowX: "auto" }}>
+                  {resp.error || "Run failed."}
+                  {"\n\n"}
+                  {JSON.stringify(resp.details, null, 2).slice(0, 3600)}
+                </pre>
+              ) : null}
+            </div>
+
+            <div style={{ minWidth: 360, flex: 1 }}>
+              <div style={{ fontWeight: 980, fontSize: 18, marginBottom: 10 }}>Submission Artifacts</div>
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button onClick={downloadPacketLive} disabled={busy} style={primaryBtn} title="Recommended: one packet with exports + metadata">
+                  Download Packet (LIVE)
+                </button>
+                <button onClick={downloadPacketFast} disabled={busy} style={secondaryBtn}>
+                  Download Packet (FAST)
+                </button>
+              </div>
+
+              <div style={{ marginTop: 10, fontSize: 13, opacity: 0.8 }}>
+                Packet = one file (judge-friendly). Individual files are available if needed.
+              </div>
+
+              {resp?.exports && exportEntries.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <details>
+                    <summary style={{ cursor: "pointer", fontWeight: 950, fontSize: 14 }}>Show individual files</summary>
+                    <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      {exportEntries.map(([k, v]) => (
+                        <button
+                          key={k}
+                          onClick={() => {
+                            const ext = k.endsWith("_csv") ? "csv" : k.endsWith("_md") ? "md" : "txt";
+                            const mime =
+                              ext === "csv"
+                                ? "text/csv;charset=utf-8"
+                                : ext === "md"
+                                ? "text/markdown;charset=utf-8"
+                                : "text/plain;charset=utf-8";
+                            const blob = new Blob([String(v ?? "")], { type: mime });
+                            downloadBlob(`matrixmint-${runId}-${k}.${ext}`, blob);
+                          }}
+                          style={secondaryBtn}
+                        >
+                          Download {k}
+                        </button>
+                      ))}
+                    </div>
+                  </details>
+                </div>
+              ) : null}
+
+              {orch?.attempts?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <details>
+                    <summary style={{ cursor: "pointer", fontWeight: 950, fontSize: 14 }}>Diagnostics (attempts)</summary>
+                    <div style={{ marginTop: 10, overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr>
+                            {["name", "ok", "status", "elapsed", "aborted", "modelUsed", "error"].map((h) => (
+                              <th key={h} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid rgba(0,0,0,0.10)" }}>
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {orch.attempts.map((a, idx) => (
+                            <tr key={idx}>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)", fontWeight: 900 }}>{a.name}</td>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>{a.ok ? "✅" : "—"}</td>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>{a.httpStatus ?? "—"}</td>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>{fmtMs(a.elapsedMs)}</td>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>{a.aborted ? "yes" : "no"}</td>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>{a.modelUsed ?? "—"}</td>
+                              <td style={{ padding: 8, borderBottom: "1px solid rgba(0,0,0,0.08)", maxWidth: 340 }}>
+                                <span style={{ opacity: 0.85 }}>{a.errorPreview ? String(a.errorPreview).slice(0, 160) : "—"}</span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Advanced (closed by default) */}
+          <div style={{ marginTop: 18 }}>
+            <details open={advancedOpen} onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}>
+              <summary style={{ cursor: "pointer", fontWeight: 980, fontSize: 16 }}>Advanced (optional)</summary>
+
+              <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div>
+                  <div style={label}>RFP Text</div>
+                  <textarea
+                    value={rfpText}
+                    onChange={(e) => setRfpText(e.target.value)}
+                    placeholder="Leave blank to use sample (disaster-relief)."
+                    style={textarea}
+                  />
+                </div>
+                <div>
+                  <div style={label}>Capability Statement</div>
+                  <textarea
+                    value={capabilityText}
+                    onChange={(e) => setCapabilityText(e.target.value)}
+                    placeholder="Leave blank to use sample (disaster-relief)."
+                    style={textarea}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginTop: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ fontWeight: 950, opacity: 0.85 }}>Model:</div>
+                <input
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  style={{
+                    padding: "12px 14px",
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.18)",
+                    minWidth: 320,
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                    fontSize: 12,
+                    fontWeight: 900,
+                    background: "white",
+                  }}
+                  title="Model string sent to /api/run"
+                />
+
+                <div style={{ flex: 1 }} />
+
+                <button onClick={runPreflightOnly} disabled={busy} style={secondaryBtn}>
+                  Run Preflight
+                </button>
+
+                <button
+                  onClick={() => runWithHeaders({ "Content-Type": "application/json", "x-matrixmint-mode": "cache" }, "FAST_MANUAL")}
+                  disabled={busy}
+                  style={secondaryBtn}
+                >
+                  Run FAST
+                </button>
+
+                <button
+                  onClick={() =>
+                    runWithHeaders(
+                      { "Content-Type": "application/json", "x-matrixmint-mode": "live", "x-matrixmint-bust-cache": "1" },
+                      "LIVE_MANUAL"
+                    )
+                  }
+                  disabled={busy}
+                  style={secondaryBtn}
+                >
+                  Run LIVE Proof
+                </button>
+              </div>
+
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                Advanced is for debugging or custom inputs. For demos: click <b>Run One-Click Demo</b> then <b>Download Packet (LIVE)</b>.
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 16, fontSize: 12, opacity: 0.7 }}>
+          Notes: FAST uses cache for stability. LIVE Proof forces fresh Gemini execution. OFFLINE is a conservative fallback.
+        </div>
+      </div>
     </div>
   );
 }

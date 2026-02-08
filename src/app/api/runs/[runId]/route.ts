@@ -1,42 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getRun } from "@/lib/runStore";
 
-// IMPORTANT:
-// Next's generated route type validator (in newer Next versions) expects:
-// context: { params: Promise<{ runId: string }> }
-// So we accept params as Promise OR object and normalize safely.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-type ParamsShape = { runId: string };
-type Ctx = { params: ParamsShape | Promise<ParamsShape> };
+function wantDownload(req: NextRequest) {
+  const u = new URL(req.url);
+  const qp = u.searchParams.get("download");
+  const hdr = req.headers.get("x-matrixmint-download");
+  return qp === "1" || qp === "true" || hdr === "1" || hdr === "true";
+}
 
-// If you store run results in memory, import your store here.
-// Example (adjust to your project):
-// import { getRunBundleById } from "@/lib/runStore";
+function filename(runId: string) {
+  return `matrixmint-run-${runId}.json`;
+}
 
-// If you store on disk, import fs/path helpers etc.
-// For now, this file assumes you already had working logic and we're only fixing typing.
+export async function GET(req: NextRequest, ctx: { params: Promise<{ runId: string }> }) {
+  const { runId } = await ctx.params;
 
-export async function GET(_req: NextRequest, ctx: Ctx) {
-  try {
-    const params = await Promise.resolve(ctx.params);
-    const runId = params?.runId;
-
-    if (!runId) {
-      return NextResponse.json({ ok: false, error: "Missing runId" }, { status: 400 });
-    }
-
-    // ---- YOUR EXISTING LOOKUP LOGIC GOES HERE ----
-    // Replace the placeholder below with whatever you previously returned.
-    //
-    // Examples:
-    // const bundle = await getRunBundleById(runId);
-    // if (!bundle) return NextResponse.json({ ok:false, error:"Run not found" }, {status:404});
-    // return NextResponse.json({ ok:true, ...bundle }, {status:200});
-
-    return NextResponse.json(
-      { ok: false, error: "Not implemented: wire GET /api/runs/[runId] to your run store." },
-      { status: 501 }
-    );
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: String(err?.message ?? err) }, { status: 500 });
+  const run = await getRun(runId);
+  if (!run) {
+    return NextResponse.json({ ok: false, error: `Run not found: ${runId}` }, { status: 404 });
   }
+
+  if (!wantDownload(req)) {
+    return NextResponse.json(run, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  const body = JSON.stringify(run, null, 2);
+  return new NextResponse(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename(runId)}"`,
+      "x-matrixmint-run-id": runId,
+      "Cache-Control": "no-store",
+    },
+  });
 }
