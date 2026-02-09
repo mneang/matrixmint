@@ -1,28 +1,28 @@
 {
-  "savedAt": 1770506586221,
+  "savedAt": 1770593354521,
   "data": {
     "summary": {
       "totalRequirements": 19,
       "coveredCount": 17,
       "partialCount": 1,
       "missingCount": 1,
-      "coveragePercent": 89.47,
+      "coveragePercent": 89.5,
       "topRisks": [
-        "Requirement FR-05 (SMS) requires a third-party provider account not included in the base solution.",
-        "Requirement NFR-03 (Error Handling) is not documented in the current capability brief."
+        "SMS functionality requires a third-party provider and external account setup.",
+        "Specific error handling and user guidance documentation is not explicitly detailed in the current capability brief."
       ],
       "nextActions": [
-        "Confirm if the client has an existing SMS provider (e.g., Twilio) for FR-05 integration.",
-        "Request technical documentation regarding UI error handling and user guidance for NFR-03.",
-        "Prepare a demonstration of the bilingual messaging and dashboard features."
+        "Confirm if the client has an existing SMS provider (e.g., Twilio) for integration.",
+        "Request technical documentation regarding standard error handling and UI validation messages.",
+        "Prepare a 30/60/90 day implementation roadmap based on the ReliefRoster deployment model."
       ],
       "proofVerifiedCount": 19,
       "proofTotalEvidenceRefs": 19,
       "proofPercent": 100,
       "proofNotes": [
-        "ReliefRoster covers all core functional requirements for registration, scheduling, and reporting.",
-        "SMS reminders require external integration which is a partial match.",
-        "Error handling documentation is missing from the capability brief.",
+        "ReliefRoster core features align with nearly all functional requirements.",
+        "Capacity for 5,000 volunteers exceeds the RFP requirement of 2,000.",
+        "Bilingual messaging and audit logs are natively supported.",
         "Proof verifier checks evidenceQuotes against the Capability Brief text (normalized matching; ellipsis wildcard supported).",
         "The \"Evidence mismatch\" flag is verifier-owned and is only added/removed by the proof verifier.",
         "Proof totals count unpaired evidence IDs (IDs without quotes) as unverified references (conservative scoring)."
@@ -31,10 +31,10 @@
     "requirements": [
       {
         "id": "FR-01",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall support volunteer registration with configurable form fields.",
         "status": "Covered",
-        "responseSummary": "ReliefRoster provides web-based volunteer registration with configurable form fields and validation.",
+        "responseSummary": "ReliefRoster provides a web-based registration system with fully configurable form fields. It includes built-in validation for required and optional data points.",
         "evidenceIds": [
           "CB-01"
         ],
@@ -45,10 +45,10 @@
       },
       {
         "id": "FR-02",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall allow coordinators to create events and define shifts with capacity limits.",
         "status": "Covered",
-        "responseSummary": "Coordinators can manage events and shifts with specific capacity limits.",
+        "responseSummary": "Coordinators have full control over event creation and shift management. The system enforces capacity limits for every defined shift.",
         "evidenceIds": [
           "CB-02"
         ],
@@ -59,10 +59,10 @@
       },
       {
         "id": "FR-03",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall allow volunteers to sign up for shifts and receive confirmations.",
         "status": "Covered",
-        "responseSummary": "Volunteers can self-sign up for shifts and receive automated email confirmations.",
+        "responseSummary": "Volunteers can self-enroll in available shifts through the web interface. Automated email confirmations are sent immediately upon signup.",
         "evidenceIds": [
           "CB-02",
           "CB-03"
@@ -75,10 +75,10 @@
       },
       {
         "id": "FR-04",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall send automated reminders 24 hours and 2 hours before a shift via email.",
         "status": "Covered",
-        "responseSummary": "The system supports automated email reminders with configurable schedules including 24h and 2h intervals.",
+        "responseSummary": "The platform supports automated email reminders with flexible scheduling. This includes the specific 24-hour and 2-hour intervals requested.",
         "evidenceIds": [
           "CB-03"
         ],
@@ -89,10 +89,10 @@
       },
       {
         "id": "FR-05",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall support optional SMS reminders (if enabled by the organization).",
         "status": "Partial",
-        "responseSummary": "SMS reminders are supported via third-party integration but require the organization to provide an account.",
+        "responseSummary": "SMS reminders are supported via integration with third-party providers. The organization must provide their own SMS account to enable this feature.",
         "evidenceIds": [
           "CB-14"
         ],
@@ -100,17 +100,19 @@
           "SMS reminders are not included by default; integration is possible via a third-party SMS provider if the organization supplies an account."
         ],
         "gapsOrQuestions": [
-          "Does the organization have a preferred SMS provider like Twilio?",
-          "Is the organization prepared to manage a separate SMS account subscription?"
+          "Does RapidRelief Network have a preferred SMS gateway provider?",
+          "Will the client manage the third-party SMS account billing directly?"
         ],
-        "riskFlags": []
+        "riskFlags": [
+          "Requires external integration and third-party account management."
+        ]
       },
       {
         "id": "FR-06",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall allow coordinators to mark attendance and record no-shows.",
         "status": "Covered",
-        "responseSummary": "ReliefRoster includes attendance tracking features for marking attendance and no-shows.",
+        "responseSummary": "Coordinators can track attendance for every shift. The system specifically allows for marking no-shows and adding relevant notes.",
         "evidenceIds": [
           "CB-04"
         ],
@@ -121,10 +123,10 @@
       },
       {
         "id": "FR-07",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall maintain a volunteer profile including languages, skills, certifications, and availability.",
         "status": "Covered",
-        "responseSummary": "Volunteer profiles store skills, language preferences, certifications, and availability notes.",
+        "responseSummary": "Comprehensive volunteer profiles are maintained within the system. These profiles track skills, language preferences, certifications, and availability notes.",
         "evidenceIds": [
           "CB-05"
         ],
@@ -135,10 +137,10 @@
       },
       {
         "id": "FR-08",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall support role-based access (Admin, Coordinator, Volunteer).",
         "status": "Covered",
-        "responseSummary": "The platform supports role-based access for Admin, Coordinator, and Volunteer roles.",
+        "responseSummary": "ReliefRoster utilizes role-based access control. It natively supports the Admin, Coordinator, and Volunteer roles defined in the RFP.",
         "evidenceIds": [
           "CB-06"
         ],
@@ -149,10 +151,10 @@
       },
       {
         "id": "FR-09",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall provide a bilingual messaging option (English/Spanish) for templates.",
         "status": "Covered",
-        "responseSummary": "Messaging templates can be authored and sent in both English and Spanish.",
+        "responseSummary": "The system supports bilingual communication. Messaging templates can be created in both English and Spanish for targeted outreach.",
         "evidenceIds": [
           "CB-07"
         ],
@@ -163,10 +165,10 @@
       },
       {
         "id": "FR-10",
-        "category": "Functional Requirements",
-        "text": "The system shall provide a dashboard showing: total registered volunteers, upcoming shifts and fill rates, attendance rate and no-show rate, volunteer hours by event.",
+        "category": "Functional",
+        "text": "The system shall provide a dashboard showing volunteer counts, shifts, attendance, and hours.",
         "status": "Covered",
-        "responseSummary": "The dashboard provides all requested metrics including volunteer counts, fill rates, and attendance data.",
+        "responseSummary": "A centralized dashboard provides real-time visibility into volunteer metrics. This includes registration counts, fill rates, attendance, and total hours by event.",
         "evidenceIds": [
           "CB-08"
         ],
@@ -177,10 +179,10 @@
       },
       {
         "id": "FR-11",
-        "category": "Functional Requirements",
+        "category": "Functional",
         "text": "The system shall support CSV export of volunteer rosters, schedules, and attendance logs.",
         "status": "Covered",
-        "responseSummary": "ReliefRoster supports CSV exports for rosters, schedules, and attendance logs.",
+        "responseSummary": "Data portability is supported through CSV exports. Rosters, schedules, and logs can be exported for external reporting or analysis.",
         "evidenceIds": [
           "CB-09"
         ],
@@ -191,10 +193,10 @@
       },
       {
         "id": "FR-12",
-        "category": "Functional Requirements",
-        "text": "The system shall allow coordinators to broadcast announcements to selected volunteer segments (by skill/language/location).",
+        "category": "Functional",
+        "text": "The system shall allow coordinators to broadcast announcements to selected volunteer segments.",
         "status": "Covered",
-        "responseSummary": "Coordinators can broadcast messages to specific segments based on skills and language preferences.",
+        "responseSummary": "Coordinators can send broadcast announcements to specific groups. Segmentation can be performed based on skills, location, or language preference.",
         "evidenceIds": [
           "CB-10"
         ],
@@ -205,10 +207,10 @@
       },
       {
         "id": "FR-13",
-        "category": "Functional Requirements",
-        "text": "The system shall provide a basic audit log of coordinator actions (event created, shift edited, message sent).",
+        "category": "Functional",
+        "text": "The system shall provide a basic audit log of coordinator actions.",
         "status": "Covered",
-        "responseSummary": "The system records coordinator actions such as event creation and messaging in an audit log.",
+        "responseSummary": "The platform maintains an audit log of administrative actions. This includes tracking event creation, shift edits, and messaging history.",
         "evidenceIds": [
           "CB-11"
         ],
@@ -219,10 +221,10 @@
       },
       {
         "id": "FR-14",
-        "category": "Functional Requirements",
-        "text": "The system shall support data retention settings (e.g., delete inactive volunteer records after X months).",
+        "category": "Functional",
+        "text": "The system shall support data retention settings.",
         "status": "Covered",
-        "responseSummary": "Configurable data retention rules are available for managing inactive volunteer records.",
+        "responseSummary": "ReliefRoster includes configurable data retention rules. Organizations can define when inactive volunteer records should be purged.",
         "evidenceIds": [
           "CB-12"
         ],
@@ -233,10 +235,10 @@
       },
       {
         "id": "FR-15",
-        "category": "Functional Requirements",
-        "text": "The system shall provide accessibility considerations for web UI (keyboard navigation and readable contrast).",
+        "category": "Functional",
+        "text": "The system shall provide accessibility considerations for web UI.",
         "status": "Covered",
-        "responseSummary": "The UI includes accessibility features such as keyboard navigation for key workflows.",
+        "responseSummary": "The web interface is designed with accessibility in mind. It supports keyboard navigation for all primary workflows.",
         "evidenceIds": [
           "CB-13"
         ],
@@ -247,10 +249,10 @@
       },
       {
         "id": "NFR-01",
-        "category": "Non-Functional Requirements",
+        "category": "Non-Functional",
         "text": "The platform shall be accessible via modern browsers on desktop and mobile.",
         "status": "Covered",
-        "responseSummary": "ReliefRoster is a web-based platform that supports mobile browsers.",
+        "responseSummary": "The platform is a web-based solution compatible with modern browsers. It is specifically optimized for mobile browser access.",
         "evidenceIds": [
           "CB-13"
         ],
@@ -261,10 +263,10 @@
       },
       {
         "id": "NFR-02",
-        "category": "Non-Functional Requirements",
+        "category": "Non-Functional",
         "text": "The platform shall support at least 2,000 registered volunteers.",
         "status": "Covered",
-        "responseSummary": "The platform supports up to 5,000 volunteers, exceeding the requirement.",
+        "responseSummary": "The system is highly scalable. Standard deployments support up to 5,000 volunteers, exceeding the RFP requirement.",
         "evidenceIds": [
           "CB-15"
         ],
@@ -275,24 +277,26 @@
       },
       {
         "id": "NFR-03",
-        "category": "Non-Functional Requirements",
+        "category": "Non-Functional",
         "text": "The platform shall provide basic error handling and clear user guidance.",
         "status": "Missing",
-        "responseSummary": "The capability brief does not explicitly detail error handling or user guidance features.",
+        "responseSummary": "While the system includes registration validation, specific documentation on general error handling and user guidance is not currently available in the brief.",
         "evidenceIds": [],
         "evidenceQuotes": [],
         "gapsOrQuestions": [
-          "Can you provide documentation on the system's error handling and user guidance?",
-          "Does the platform include built-in help tooltips or a user manual?"
+          "Can you provide examples of system error messages and user guidance tooltips?",
+          "Is there a help center or knowledge base integrated into the UI?"
         ],
-        "riskFlags": []
+        "riskFlags": [
+          "Lack of explicit evidence for error handling standards."
+        ]
       },
       {
         "id": "NFR-04",
-        "category": "Non-Functional Requirements",
+        "category": "Non-Functional",
         "text": "The platform shall ensure that exported data can be downloaded without additional tools.",
         "status": "Covered",
-        "responseSummary": "Data is exported in CSV format, which is a standard format requiring no specialized tools.",
+        "responseSummary": "Data is exported in standard CSV format. This ensures compatibility with common spreadsheet software without requiring proprietary tools.",
         "evidenceIds": [
           "CB-09"
         ],
@@ -303,21 +307,20 @@
       }
     ],
     "proposalOutline": {
-      "executiveSummary": "ReliefRoster by MatrixMint Solutions is a robust, web-based volunteer coordination platform that meets 89% of the RapidRelief Network's requirements out-of-the-box. It specifically excels in bilingual communication, automated scheduling, and high-capacity volunteer management.",
+      "executiveSummary": "MatrixMint Solutions proposes ReliefRoster, a specialized volunteer coordination platform designed to meet the rapid response needs of RapidRelief Network. Our solution directly addresses the goals of reducing onboarding time and improving shift reliability through automated workflows and bilingual communication tools.",
       "sections": [
-        "1. Executive Summary",
-        "2. Solution Overview: ReliefRoster Platform",
-        "3. Compliance Matrix and Technical Fit",
-        "4. Implementation Plan (30/60/90 Day Milestones)",
-        "5. Pricing and Licensing Approach",
-        "6. Risk Management and Mitigations",
-        "7. Support, Training, and Accessibility"
+        "1. Solution Summary: ReliefRoster Overview",
+        "2. Compliance Matrix: Detailed Requirement Mapping",
+        "3. Implementation Plan: 30/60/90 Day Roadmap",
+        "4. Pricing Approach: Subscription and Integration Costs",
+        "5. Risks and Mitigations: SMS and Data Management",
+        "6. Support and Training: Coordinator and Volunteer Onboarding"
       ],
       "evidenceVerified": true,
       "evidenceVerificationNotes": [
-        "All 'Covered' statuses are mapped directly to CB-xx evidence IDs.",
-        "FR-05 is marked Partial due to the requirement for a third-party SMS account.",
-        "NFR-03 is marked Missing as it is not addressed in the Capability Brief."
+        "All functional requirements are mapped to ReliefRoster capabilities.",
+        "SMS integration (FR-05) and Error Handling (NFR-03) are identified as areas requiring further client clarification.",
+        "Scalability (NFR-02) is confirmed at 250% of the requested capacity."
       ]
     }
   }
