@@ -1,5 +1,6 @@
 export const runtime = "nodejs";
 
+import os from "os";
 import { NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
@@ -96,7 +97,27 @@ type AnalyzeMeta = {
 
 // --------- Caching ----------
 const RESULT_CACHE = new Map<string, { data: MatrixResult; savedAt: number }>();
-const CACHE_DIR = path.join(process.cwd(), ".matrixmint_cache");
+
+/**
+ * Vercel / serverless note:
+ * - The deployed filesystem is read-only (often /var/task).
+ * - Only /tmp is writable.
+ * - Locally, process.cwd() is fine.
+ *
+ * You can override explicitly with MATRIXMINT_CACHE_DIR (recommended for clarity).
+ */
+function getCacheDir() {
+  const envOverride = (process.env.MATRIXMINT_CACHE_DIR || "").trim();
+  if (envOverride) return envOverride;
+
+  const isServerless = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+  const base = isServerless ? "/tmp" : process.cwd();
+  return path.join(base, ".matrixmint_cache");
+}
+
+const CACHE_DIR = process.env.VERCEL
+  ? path.join("/tmp", ".matrixmint_cache")
+  : path.join(process.cwd(), ".matrixmint_cache");
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const CACHE_VERSION = "v4";
 

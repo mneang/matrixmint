@@ -3,10 +3,23 @@ import { promises as fs } from "fs";
 
 export type StoredRun = any;
 
-const DEFAULT_DIR = path.join(process.cwd(), ".matrixmint", "runs");
+// Vercel serverless filesystem: /var/task is read-only; /tmp is writable.
+// For local dev (Codespaces), process.cwd() is fine.
+function defaultBaseDir() {
+  if (process.env.MATRIXMINT_RUNS_DIR) return null; // env override wins (handled in runsDir)
+  if (process.env.VERCEL) return "/tmp";
+  return process.cwd();
+}
+
+function defaultRunsDir() {
+  const base = defaultBaseDir() || process.cwd();
+  return path.join(base, ".matrixmint", "runs");
+}
 
 function runsDir() {
-  return process.env.MATRIXMINT_RUNS_DIR || DEFAULT_DIR;
+  // If user explicitly sets MATRIXMINT_RUNS_DIR, trust it.
+  // NOTE: On Vercel, this should point to /tmp/... if you want disk writes.
+  return (process.env.MATRIXMINT_RUNS_DIR || "").trim() || defaultRunsDir();
 }
 
 async function ensureDir() {
@@ -21,14 +34,20 @@ function memStore(): Map<string, StoredRun> {
 
 export async function saveRun(runId: string, bundle: StoredRun) {
   if (!runId) throw new Error("saveRun: missing runId");
-  await ensureDir();
 
   // Memory (fast / intra-process)
   memStore().set(runId, bundle);
 
   // Disk (survive restarts / judge-friendly)
-  const file = path.join(runsDir(), `${runId}.json`);
-  await fs.writeFile(file, JSON.stringify(bundle, null, 2), "utf8");
+  // On Vercel this must be under /tmp (or an env override that is writable).
+  try {
+    await ensureDir();
+    const file = path.join(runsDir(), `${runId}.json`);
+    await fs.writeFile(file, JSON.stringify(bundle, null, 2), "utf8");
+  } catch (e: any) {
+    // Do not break the demo if disk is not writable; memory still works.
+    // We keep this silent to avoid noisy logs in judge runs.
+  }
 }
 
 export async function getRun(runId: string): Promise<StoredRun | null> {
@@ -52,9 +71,13 @@ export async function getRun(runId: string): Promise<StoredRun | null> {
 }
 
 export async function listRuns(limit = 50) {
-  await ensureDir();
+  // Disk is best-effort: if not available, fall back to memory list
+  try {
+    await ensureDir();
+  } catch {
+    // ignore
+  }
 
-  // Disk is source of truth (survive restart)
   let files: string[] = [];
   try {
     files = await fs.readdir(runsDir());
@@ -63,6 +86,25 @@ export async function listRuns(limit = 50) {
   }
 
   const jsonFiles = files.filter((f) => f.endsWith(".json"));
+
+  // If disk is empty/unavailable, provide a small memory-based listing (best effort).
+  if (!jsonFiles.length) {
+    const mem = memStore();
+    const runs: any[] = [];
+    let i = 0;
+    for (const [rid, parsed] of mem.entries()) {
+      runs.push({
+        runId: rid,
+        createdAtIso:
+          parsed?.orchestrator?.startedAtIso || parsed?.createdAtIso || new Date().toISOString(),
+        orchestrator: parsed?.orchestrator || { runId: rid },
+        runSummary: parsed?.runSummary || {},
+      });
+      i++;
+      if (i >= limit) break;
+    }
+    return runs;
+  }
 
   // Sort newest first by mtime
   const stats = await Promise.all(
