@@ -1,36 +1,125 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MatrixMint — Evidence-Locked Proposal Orchestrator (Gemini 3)
 
-## Getting Started
+MatrixMint turns an RFP (Request for Proposal) into an **evidence-locked compliance matrix**, verifies every claim, then exports a **bid-ready submission packet**.
 
-First, run the development server:
+**Why it matters:** In procurement, hallucinated claims = real risk. MatrixMint is built to produce **trustable AI outputs** that are reviewable by legal, security, and delivery teams.
 
+---
+
+## What MatrixMint Does
+
+**Pipeline**
+1. **Analyze**: Parse an RFP into a structured requirement matrix  
+2. **Evidence-Lock**: Draft responses only when they can be supported by provided capability evidence  
+3. **Proof Verification**: Self-check loop verifies claim ↔ evidence references  
+4. **Export**: Generate a bid-ready packet (one file) + individual artifacts
+
+**Outputs (Exports)**
+- `proofpack_md` — evidence linkages for review
+- `bidpacket_md` — structured bid response
+- `proposal_draft_md` — narrative proposal draft
+- `clarifications_email_md` — clarifying questions to reduce risk early
+- `risks_csv` — risk register for internal stakeholders
+
+---
+
+## What Makes It “Gemini 3”
+
+MatrixMint is not a prompt wrapper. Gemini 3 is used for:
+- **Reasoning** over messy RFP language into a usable matrix
+- **Multi-step tool orchestration** (analyze → prove → export)
+- **Low-latency iteration** for real procurement workflows
+- **Self-check proof loop** to verify claims before documents are produced
+
+---
+
+## Demo (Judges: fastest path)
+
+Open the app and go to:
+
+- **`/demo`** → “Submission Mode”
+  - Click **Run One-Click Demo**
+  - Then click **Download Packet (LIVE)** (or **FAST** if rate limited)
+
+**Key metrics to watch**
+- **Coverage**: how much of the RFP was addressed
+- **Proof**: % of claims that successfully tie back to evidence references
+- **Exports**: confirms packet artifacts are generated
+
+---
+
+## API Quick Tests (copy/paste)
+
+### 1) Samples list
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+curl -sS http://127.0.0.1:3000/api/samples | jq '{count:(.samples|length), first:(.samples[0].id//null)}'
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2) Run (LIVE preferred; auto-fallback to CACHE on quota)
+```bash
+curl -sS -X POST http://127.0.0.1:3000/api/run \
+  -H "Content-Type: application/json" \
+  -H "x-matrixmint-mode: live" \
+  -H "x-matrixmint-bust-cache: 1" \
+  -d '{"sampleId":"disaster-relief","model":"gemini-3-flash-preview","download":false}' \
+| jq '{ok:.ok, lane:.orchestrator.ladderUsed, model:.orchestrator.modelUsed, proof:.runSummary.proof, coverage:.runSummary.coveragePercent}'
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 3) Download the submission packet (one file)
+```bash
+RID=$(curl -sS -X POST http://127.0.0.1:3000/api/run \
+  -H "Content-Type: application/json" \
+  -H "x-matrixmint-mode: live" \
+  -H "x-matrixmint-bust-cache: 1" \
+  -d '{"sampleId":"disaster-relief","model":"gemini-3-flash-preview","download":false}' \
+| jq -r '.orchestrator.runId')
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+curl -sS "http://127.0.0.1:3000/api/runs/$RID?download=1" -o "matrixmint-run-$RID.json"
 
-## Learn More
+jq '{ok, lane:.orchestrator.ladderUsed, model:.orchestrator.modelUsed, exports:(.exports|keys)}' "matrixmint-run-$RID.json"
+```
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Local Development
+**Prereqs**
+- Node.js 18+ (recommended)
+- npm
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Install + run
+```bash
+npm ci
+npm run dev
+```
+Open http://localhost:3000
 
-## Deploy on Vercel
+### Production build (sanity)
+```bash
+npm ci
+npm run build
+npm run start
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Configuration
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Set your Gemini API key in `.env.local` (see `.env.example` if present).
+
+If your environment has proxy / localhost origin issues, you can set:
+
+- `MATRIXMINT_INTERNAL_ORIGIN` *(optional)* — internal server-to-server calls
+
+---
+
+## Notes on LIVE vs FAST
+
+- **LIVE**: attempts fresh Gemini execution; may be rate-limited depending on quota  
+- **FAST**: uses cache replay for reliability and consistent judging  
+- MatrixMint automatically falls back to **CACHE** when LIVE is unavailable and records the attempts for transparency.
+
+---
+
+## License
+
+MIT
+
+
