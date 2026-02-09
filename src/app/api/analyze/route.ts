@@ -1,6 +1,5 @@
 export const runtime = "nodejs";
 
-import os from "os";
 import { NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
@@ -12,6 +11,7 @@ import { matrixResultSchema } from "@/lib/matrixSchema";
 // --------- Thinking level compat ----------
 let THINKING_LEVEL: any = "MEDIUM";
 try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mod = require("@google/genai");
   if (mod?.ThinkingLevel?.MEDIUM) THINKING_LEVEL = mod.ThinkingLevel.MEDIUM;
   else if (mod?.ThinkingLevel?.HIGH) THINKING_LEVEL = mod.ThinkingLevel.HIGH;
@@ -95,165 +95,11 @@ type AnalyzeMeta = {
   proofRepair?: ProofRepairMeta;
 };
 
-// --------- Caching ----------
-const RESULT_CACHE = new Map<string, { data: MatrixResult; savedAt: number }>();
-
-/**
- * Vercel / serverless note:
- * - The deployed filesystem is read-only (often /var/task).
- * - Only /tmp is writable.
- * - Locally, process.cwd() is fine.
- *
- * You can override explicitly with MATRIXMINT_CACHE_DIR (recommended for clarity).
- */
-function getCacheDir() {
-  const envOverride = (process.env.MATRIXMINT_CACHE_DIR || "").trim();
-  if (envOverride) return envOverride;
-
-  const isServerless = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
-  const base = isServerless ? "/tmp" : process.cwd();
-  return path.join(base, ".matrixmint_cache");
-}
-
-const CACHE_DIR = process.env.VERCEL
-  ? path.join("/tmp", ".matrixmint_cache")
-  : path.join(process.cwd(), ".matrixmint_cache");
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
-const CACHE_VERSION = "v4";
-
-async function ensureCacheDir() {
-  await fs.mkdir(CACHE_DIR, { recursive: true });
-}
-
-function cachePathForKey(key: string) {
-  return path.join(CACHE_DIR, `${key}.json`);
-}
-
-async function deleteDiskCache(key: string) {
-  try {
-    const p = cachePathForKey(key);
-    await fs.rm(p, { force: true });
-  } catch {
-    // ignore
-  }
-}
-
-async function readDiskCache(key: string): Promise<{ data: MatrixResult; savedAt: number } | null> {
-  try {
-    await ensureCacheDir();
-    const p = cachePathForKey(key);
-    const raw = await fs.readFile(p, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed?.data || typeof parsed?.savedAt !== "number") return null;
-
-    if (Date.now() - parsed.savedAt > CACHE_TTL_MS) return null;
-
-    matrixResultSchema.parse(parsed.data);
-    return { data: parsed.data as MatrixResult, savedAt: parsed.savedAt as number };
-  } catch {
-    return null;
-  }
-}
-
-async function writeDiskCache(key: string, data: MatrixResult) {
-  await ensureCacheDir();
-  const p = cachePathForKey(key);
-  const tmp = `${p}.tmp`;
-  const payload = JSON.stringify({ savedAt: Date.now(), data }, null, 2);
-  await fs.writeFile(tmp, payload, "utf8");
-  await fs.rename(tmp, p);
-}
-
-async function diskCacheExists(key: string) {
-  try {
-    await ensureCacheDir();
-    await fs.access(cachePathForKey(key));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Cache quality guard:
- * If we already have a cached result (memory or disk),
- * do not overwrite it with an offline fallback (conservative, often lower-coverage).
- */
-async function shouldWriteOfflineFallback(key: string) {
-  if (RESULT_CACHE.has(key)) return false;
-  if (await diskCacheExists(key)) return false;
-  return true;
-}
-
-// --------- Quota circuit breaker ----------
-const QUOTA_STATE: Record<string, QuotaMeta> = {
-  global: { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
-  "gemini-3-flash-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
-  "gemini-3-pro-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
-};
-
-function getQuotaState(model: string): QuotaMeta {
-  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
-  const now = Date.now();
-  if (m.blocked && m.blockedUntilUnixMs <= now) {
-    m.blocked = false;
-    m.blockedUntilUnixMs = 0;
-    m.lastError = "";
-  }
-  return { ...m };
-}
-
-function setQuotaBlocked(model: string, blockedUntilUnixMs: number, lastError: string) {
-  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
-  m.blocked = true;
-  m.blockedUntilUnixMs = Math.max(blockedUntilUnixMs, Date.now() + 10_000);
-  m.lastError = lastError || "";
-  QUOTA_STATE[model] = m;
-}
-
-function parseRetryDelayMs(details: any): number {
-  const retryDelay =
-    details?.error?.details?.find?.((d: any) => String(d?.["@type"] || "").includes("RetryInfo"))?.retryDelay;
-
-  if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
-    const secs = Number(retryDelay.replace("s", ""));
-    if (Number.isFinite(secs) && secs > 0) return Math.min(120_000, secs * 1000);
-  }
-  return 15_000;
-}
-
-// --------- Live gate (serializes live Gemini calls) ----------
-let LIVE_CHAIN: Promise<void> = Promise.resolve();
-let LAST_LIVE_AT = 0;
-
+// --------- Helpers ----------
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
 }
 
-/**
- * Serializes calls and enforces a minimum gap between live Gemini requests.
- * This prevents burst quota hits during judgeRun's back-to-back requests.
- */
-async function withLiveGate<T>(minGapMs: number, fn: () => Promise<T>): Promise<T> {
-  let release!: () => void;
-  const prev = LIVE_CHAIN;
-  LIVE_CHAIN = new Promise<void>((r) => (release = r));
-
-  await prev;
-
-  const waitMs = LAST_LIVE_AT + minGapMs - Date.now();
-  if (waitMs > 0) await sleep(waitMs);
-
-  try {
-    return await fn();
-  } finally {
-    LAST_LIVE_AT = Date.now();
-    release();
-  }
-}
-// --------- End live gate ----------
-
-// --------- Helpers ----------
 function sha256(s: string) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
@@ -441,12 +287,6 @@ async function extractResponseText(resp: any): Promise<string> {
   return "";
 }
 
-/**
- * Timeout policy:
- * - LIVE: generous headroom to avoid judge-timeout-triggered aborts.
- * - AUTO: slightly tighter but still stable.
- * - Env overrides supported.
- */
 function resolveModelTimeoutMs(params: {
   mode: "auto" | "live" | "cache" | "offline";
   model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
@@ -463,6 +303,158 @@ function resolveModelTimeoutMs(params: {
   }
   return mode === "live" ? flashLive : flashAuto;
 }
+
+// --------- Caching (memory + best-effort disk) ----------
+const RESULT_CACHE = new Map<string, { data: MatrixResult; savedAt: number }>();
+
+const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+const CACHE_VERSION = "v4";
+
+/**
+ * Vercel note:
+ * - Deployed FS is read-only (often /var/task).
+ * - Only /tmp is writable.
+ * - Allow override via MATRIXMINT_CACHE_DIR for clarity.
+ */
+function getCacheDir() {
+  const envOverride = (process.env.MATRIXMINT_CACHE_DIR || "").trim();
+  if (envOverride) return envOverride;
+
+  const isServerless = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+  const base = isServerless ? "/tmp" : process.cwd();
+  return path.join(base, ".matrixmint_cache");
+}
+
+async function ensureCacheDir() {
+  try {
+    await fs.mkdir(getCacheDir(), { recursive: true });
+  } catch {
+    // best-effort: if this fails, we still can operate without disk cache
+  }
+}
+
+function cachePathForKey(key: string) {
+  return path.join(getCacheDir(), `${key}.json`);
+}
+
+async function deleteDiskCache(key: string) {
+  try {
+    await fs.rm(cachePathForKey(key), { force: true });
+  } catch {
+    // ignore
+  }
+}
+
+async function readDiskCache(key: string): Promise<{ data: MatrixResult; savedAt: number } | null> {
+  try {
+    await ensureCacheDir();
+    const raw = await fs.readFile(cachePathForKey(key), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed?.data || typeof parsed?.savedAt !== "number") return null;
+
+    if (Date.now() - parsed.savedAt > CACHE_TTL_MS) return null;
+
+    matrixResultSchema.parse(parsed.data);
+    return { data: parsed.data as MatrixResult, savedAt: parsed.savedAt as number };
+  } catch {
+    return null;
+  }
+}
+
+async function writeDiskCache(key: string, data: MatrixResult) {
+  // Best-effort: NEVER fail the request because disk cache write failed
+  try {
+    await ensureCacheDir();
+    const p = cachePathForKey(key);
+    const tmp = `${p}.tmp`;
+    const payload = JSON.stringify({ savedAt: Date.now(), data }, null, 2);
+    await fs.writeFile(tmp, payload, "utf8");
+    await fs.rename(tmp, p);
+  } catch {
+    // ignore
+  }
+}
+
+async function diskCacheExists(key: string) {
+  try {
+    await ensureCacheDir();
+    await fs.access(cachePathForKey(key));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cache quality guard:
+ * If we already have a cached result (memory or disk),
+ * do not overwrite it with an offline fallback.
+ */
+async function shouldWriteOfflineFallback(key: string) {
+  if (RESULT_CACHE.has(key)) return false;
+  if (await diskCacheExists(key)) return false;
+  return true;
+}
+
+// --------- Quota circuit breaker ----------
+const QUOTA_STATE: Record<string, QuotaMeta> = {
+  global: { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
+  "gemini-3-flash-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
+  "gemini-3-pro-preview": { blocked: false, blockedUntilUnixMs: 0, lastError: "" },
+};
+
+function getQuotaState(model: string): QuotaMeta {
+  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
+  const now = Date.now();
+  if (m.blocked && m.blockedUntilUnixMs <= now) {
+    m.blocked = false;
+    m.blockedUntilUnixMs = 0;
+    m.lastError = "";
+  }
+  return { ...m };
+}
+
+function setQuotaBlocked(model: string, blockedUntilUnixMs: number, lastError: string) {
+  const m = QUOTA_STATE[model] || QUOTA_STATE.global;
+  m.blocked = true;
+  m.blockedUntilUnixMs = Math.max(blockedUntilUnixMs, Date.now() + 10_000);
+  m.lastError = lastError || "";
+  QUOTA_STATE[model] = m;
+}
+
+function parseRetryDelayMs(details: any): number {
+  const retryDelay =
+    details?.error?.details?.find?.((d: any) => String(d?.["@type"] || "").includes("RetryInfo"))?.retryDelay;
+
+  if (typeof retryDelay === "string" && retryDelay.endsWith("s")) {
+    const secs = Number(retryDelay.replace("s", ""));
+    if (Number.isFinite(secs) && secs > 0) return Math.min(120_000, secs * 1000);
+  }
+  return 15_000;
+}
+
+// --------- Live gate (serializes live Gemini calls) ----------
+let LIVE_CHAIN: Promise<void> = Promise.resolve();
+let LAST_LIVE_AT = 0;
+
+async function withLiveGate<T>(minGapMs: number, fn: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const prev = LIVE_CHAIN;
+  LIVE_CHAIN = new Promise<void>((r) => (release = r));
+
+  await prev;
+
+  const waitMs = LAST_LIVE_AT + minGapMs - Date.now();
+  if (waitMs > 0) await sleep(waitMs);
+
+  try {
+    return await fn();
+  } finally {
+    LAST_LIVE_AT = Date.now();
+    release();
+  }
+}
+// --------- End live gate ----------
 
 async function generateWithRetries(params: {
   ai: GoogleGenAI;
@@ -505,6 +497,21 @@ async function generateWithRetries(params: {
     }
   }
   throw new Error("Retry loop fell through unexpectedly");
+}
+
+async function generateParseValidate(params: {
+  ai: GoogleGenAI;
+  model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
+  prompt: string;
+  jsonSchema: any;
+  thinkingLevel: any;
+  timeoutMs: number;
+}) {
+  const resp = await generateWithRetries(params);
+  const raw = (await extractResponseText(resp)) ?? "";
+  const json = safeJsonParse(raw);
+  const parsed = matrixResultSchema.parse(json);
+  return parsed as MatrixResult;
 }
 
 function computeProof(parsed: any, capabilityText: string): MatrixResult {
@@ -569,9 +576,8 @@ function computeProof(parsed: any, capabilityText: string): MatrixResult {
 }
 
 /**
- * Self-healing proof repair (A):
- * If evidenceIds exist but evidenceQuotes don't match the Capability Brief text,
- * replace quotes with deterministic snippets extracted from capabilityText around each evidenceId.
+ * Self-healing proof repair:
+ * Replace evidenceQuotes with deterministic snippets from Capability Brief around each evidenceId.
  * This keeps us honest (no invention) and makes proof verifiable.
  */
 function repairEvidenceQuotes(result: MatrixResult, capabilityText: string) {
@@ -634,7 +640,6 @@ function repairEvidenceQuotes(result: MatrixResult, capabilityText: string) {
       ...r,
       evidenceIds,
       evidenceQuotes: newQuotes,
-      // remove mismatch; verifier will re-add if still mismatched
       riskFlags: uniqStrings((r.riskFlags ?? []).filter((x) => String(x) !== "Evidence mismatch")),
     };
   });
@@ -651,10 +656,6 @@ function needsProofRepair(result: MatrixResult) {
   return anyMismatch;
 }
 
-/**
- * DEMO breaker (guaranteed mismatch):
- * Append a token that will not exist in the capability brief.
- */
 function maybeDemoBreakOneQuote(result: MatrixResult): MatrixResult {
   const reqs = result.requirements ?? [];
   const token = " @@BROKEN_PROOF@@";
@@ -670,21 +671,6 @@ function maybeDemoBreakOneQuote(result: MatrixResult): MatrixResult {
     }
   }
   return result;
-}
-
-async function generateParseValidate(params: {
-  ai: GoogleGenAI;
-  model: "gemini-3-flash-preview" | "gemini-3-pro-preview";
-  prompt: string;
-  jsonSchema: any;
-  thinkingLevel: any;
-  timeoutMs: number;
-}) {
-  const resp = await generateWithRetries(params);
-  const raw = (await extractResponseText(resp)) ?? "";
-  const json = safeJsonParse(raw);
-  const parsed = matrixResultSchema.parse(json);
-  return parsed as MatrixResult;
 }
 
 // --------- Deterministic OFFLINE analyzer ----------
@@ -953,11 +939,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, data: withProof, meta });
     }
 
-    // --- Circuit breaker gate (AUTO only) ---
+    // --- Circuit breaker gate (AUTO/CACHE only) ---
     const q = getQuotaState(requestedModel);
     meta.quota = q;
 
-    const allowLive = mode === "live" ? true : mode === "auto" || mode === "cache" ? !q.blocked : false;
+    const allowLive =
+      mode === "live" ? true : mode === "auto" || mode === "cache" ? !q.blocked : false;
 
     if (mode === "live" && q.blocked) {
       meta.warnings?.push("Quota circuit breaker active; live mode will still attempt the API call.");
@@ -1019,7 +1006,7 @@ export async function POST(req: Request) {
         if (isQuotaExceededError(err)) throw err;
         if (isOverloadedError(err)) throw err;
 
-        // Strict retry for "format" issues only (not quota/overload)
+        // Strict retry for format issues only
         return await generateParseValidate({
           ai,
           model: m,
@@ -1056,12 +1043,12 @@ export async function POST(req: Request) {
       // Proof compute (first pass)
       let withProof = computeProof(parsed, capabilityText);
 
-      // DEMO: inject a mismatch to show self-healing in the video
+      // DEMO: inject mismatch to show self-healing
       if (demoBreakProof) {
         withProof = computeProof(maybeDemoBreakOneQuote(withProof), capabilityText);
       }
 
-      // Self-healing proof loop (A)
+      // Self-healing proof loop
       const before = withProof.summary?.proofPercent;
       if (needsProofRepair(withProof)) {
         meta.proofRepair = meta.proofRepair || { triggered: false, attempts: 0, fixedMismatches: 0, notes: [] };
@@ -1078,7 +1065,6 @@ export async function POST(req: Request) {
           const repaired = repairEvidenceQuotes(cur, capabilityText);
           totalFixed += repaired.fixedMismatches;
           cur = computeProof(repaired.repaired, capabilityText);
-
           if (!needsProofRepair(cur)) break;
         }
 
@@ -1111,7 +1097,7 @@ export async function POST(req: Request) {
 
       return NextResponse.json({ ok: true, data: withProof, meta });
     } catch (err: any) {
-      // ---- Timeout -> offline fallback (OK even in LIVE; deterministic) ----
+      // ---- Timeout -> offline fallback ----
       if (isAbortError(err)) {
         meta.warnings?.push("Live request timed out; returned offline deterministic analysis (conservative).");
         meta.quota = getQuotaState(primary);
@@ -1131,7 +1117,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, data: withProof, meta });
       }
 
-      // ---- Quota exceeded: set breaker + secondary attempt in LIVE, else offline ----
+      // ---- Quota exceeded ----
       if (isQuotaExceededError(err)) {
         const retryMs = parseRetryDelayMs(err);
         setQuotaBlocked(primary, Date.now() + retryMs, String(err?.message ?? "quota"));
@@ -1185,7 +1171,7 @@ export async function POST(req: Request) {
             return NextResponse.json({ ok: true, data: withProof2, meta });
           } catch (err2: any) {
             const retryMs2 = isQuotaExceededError(err2) ? parseRetryDelayMs(err2) : retryMs;
-            meta.warnings?.push("Live quota still exceeded; refusing offline fallback in LIVE. Returning 429 for retry.");
+            meta.warnings?.push("Live quota still exceeded; returning 429 for retry.");
 
             return NextResponse.json(
               { ok: false, error: "quota_exceeded", retryAfterMs: retryMs2, meta },
@@ -1212,7 +1198,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true, data: withProof, meta });
       }
 
-      // ---- Overloaded: attempt secondary, else offline ----
+      // ---- Overloaded ----
       if (isOverloadedError(err)) {
         meta.warnings?.push(`${primary} overloaded; attempting ${secondary}.`);
         try {
